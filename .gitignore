@@ -1,0 +1,19 @@
+# --- Rust / Cargo build output ---
+/target
+
+# --- Artifacts of the Hallmark design pass (screenshots, logs, capture scripts) ---
+/.hallmark/
+
+# --- IDE & editors ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- OS junk ---
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# --- Misc logs ---
+*.log

@@ -1,0 +1,10 @@
+[package]
+name = "rusty_git"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+eframe = "0.37.0"
+rfd = "0.17.2"
