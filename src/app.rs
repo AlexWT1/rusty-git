@@ -365,15 +365,14 @@ impl eframe::App for RustyGitApp {
             self.selected_tab = MainTab::Files;
         }
 
-        // Top Navigation & Action Bar — panel separators are painted by hand as
-        // hairlines (`show_separator_line(false)`); one token controls them all.
+        // Top Navigation & Action Bar
         egui::Panel::top("top_bar")
             .exact_size(metrics::TOPBAR_H)
-            .show_separator_line(false)
+            .show_separator_line(true)
             .frame(
                 egui::Frame::NONE
                     .fill(tokens::BG)
-                    .inner_margin(egui::Margin::symmetric(metrics::SP_SM as i8, 8)),
+                    .inner_margin(egui::Margin::symmetric(metrics::SP_MD as i8, 8)),
             )
             .show(ui, |ui| {
                 self.render_top_bar(ui);
@@ -382,11 +381,11 @@ impl eframe::App for RustyGitApp {
         // Bottom Status Bar
         egui::Panel::bottom("status_bar")
             .exact_size(metrics::STATUSBAR_H)
-            .show_separator_line(false)
+            .show_separator_line(true)
             .frame(
                 egui::Frame::NONE
                     .fill(tokens::BG)
-                    .inner_margin(egui::Margin::symmetric(metrics::SP_SM as i8, 4)),
+                    .inner_margin(egui::Margin::symmetric(metrics::SP_MD as i8, 4)),
             )
             .show(ui, |ui| {
                 self.render_bottom_bar(ui);
@@ -398,19 +397,14 @@ impl eframe::App for RustyGitApp {
             .default_size(320.0)
             .min_size(240.0)
             .max_size(600.0)
-            .show_separator_line(false)
-            .frame(egui::Frame::NONE.fill(tokens::BG).inner_margin(egui::Margin::same(0)))
+            .show_separator_line(true)
+            .frame(
+                egui::Frame::NONE
+                    .fill(tokens::BG)
+                    .inner_margin(egui::Margin::symmetric(metrics::SP_SM as i8, metrics::SP_SM as i8)),
+            )
             .show(ui, |ui| {
                 self.render_sidebar(ui);
-                // Right hairline of the sidebar, painted after the content.
-                let rect = ui.min_rect();
-                ui.painter().line_segment(
-                    [
-                        egui::Pos2::new(rect.right() + metrics::SP_XS, rect.top()),
-                        egui::Pos2::new(rect.right() + metrics::SP_XS, rect.bottom()),
-                    ],
-                    egui::Stroke::new(1.0, tokens::HAIRLINE),
-                );
             });
 
         // Main Center Content
@@ -432,8 +426,8 @@ impl eframe::App for RustyGitApp {
 // UI Rendering Implementations
 impl RustyGitApp {
     fn render_top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(metrics::SP_XS, 0.0);
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(metrics::SP_SM, 0.0);
 
             // Brand: an amber-ruled mark with the branch glyph, "RustyGit" wordmark.
             let (mark, _mark_resp) = ui.allocate_exact_size(
@@ -466,21 +460,24 @@ impl RustyGitApp {
 
             // Current repo path.
             if let Some(repo) = &self.repo_path {
+                let (icon_rect, _) = ui.allocate_exact_size(
+                    Vec2::splat(metrics::ICON_SIZE),
+                    egui::Sense::hover(),
+                );
                 icons::paint(
                     ui.painter(),
-                    egui::Rect::from_center_size(
-                        ui.cursor().left_top() + egui::vec2(metrics::SP_2XS, 8.0),
-                        Vec2::splat(metrics::ICON_SIZE - 2.0),
-                    ),
+                    icons::glyph_in(icon_rect, metrics::ICON_SIZE - 2.0),
                     icons::Icon::Folder,
                     tokens::TEXT_FAINT,
                 );
-                ui.add_space(metrics::ICON_SIZE + 2.0);
-                ui.label(
-                    RichText::new(repo.to_string_lossy().to_string())
-                        .monospace()
-                        .size(metrics::TEXT_SMALL)
-                        .color(tokens::TEXT_MUTED),
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(repo.to_string_lossy().to_string())
+                            .monospace()
+                            .size(metrics::TEXT_SMALL)
+                            .color(tokens::TEXT_MUTED),
+                    )
+                    .truncate(),
                 );
             } else {
                 ui.label(
@@ -491,6 +488,7 @@ impl RustyGitApp {
                 );
             }
 
+            // Right-aligned actions: placed FIRST via right_to_left so they occupy the right edge
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(metrics::SP_XS, 0.0);
 
@@ -532,7 +530,7 @@ impl RustyGitApp {
                     self.run_async_op("Fetch", "Fetching remote refs...", |dir| git::fetch(dir));
                 }
 
-                // Current branch chip: opens the Branches view.
+                // Current branch chip: opens the Branches view (matching CTRL_H height).
                 if self.is_git_repo && !self.current_branch.is_empty() {
                     let name = self.current_branch.clone();
                     let font = egui::FontId::proportional(metrics::TEXT_BODY);
@@ -541,21 +539,27 @@ impl RustyGitApp {
                         .layout_no_wrap(name.clone(), font.clone(), tokens::ACCENT)
                         .size()
                         .x;
-                    let w = text_w + metrics::ICON_SIZE + 14.0;
+                    let w = text_w + metrics::ICON_SIZE + 20.0;
                     let (rect, resp) = ui.allocate_exact_size(
-                        Vec2::new(w, metrics::CTRL_H_SM),
+                        Vec2::new(w, metrics::CTRL_H),
                         egui::Sense::click(),
                     );
                     let p = &ui.painter_at(rect);
                     p.rect_filled(
                         rect,
-                        tokens::RADIUS_CHIP,
+                        tokens::RADIUS_WIDGET,
                         if resp.hovered() { tokens::SURFACE_HI } else { tokens::ACCENT_BG },
+                    );
+                    p.rect_stroke(
+                        rect,
+                        tokens::RADIUS_WIDGET,
+                        egui::Stroke::new(1.0, if resp.hovered() { tokens::ACCENT } else { tokens::ACCENT_BG }),
+                        egui::StrokeKind::Middle,
                     );
                     if resp.has_focus() {
                         p.rect_stroke(
                             rect.expand(1.5),
-                            tokens::RADIUS_CHIP,
+                            tokens::RADIUS_WIDGET,
                             egui::Stroke::new(1.5, tokens::ACCENT),
                             egui::StrokeKind::Middle,
                         );
@@ -563,15 +567,15 @@ impl RustyGitApp {
                     icons::paint(
                         p,
                         egui::Rect::from_center_size(
-                            egui::Pos2::new(rect.left() + 6.0 + 7.0, rect.center().y),
-                            Vec2::splat(metrics::ICON_SIZE - 2.0),
+                            egui::Pos2::new(rect.left() + 8.0 + metrics::ICON_SIZE * 0.5, rect.center().y),
+                            Vec2::splat(metrics::ICON_SIZE),
                         ),
                         icons::Icon::Branch,
                         tokens::ACCENT,
                     );
                     widgets::paint_text(
                         p,
-                        egui::Pos2::new(rect.left() + 6.0 + 14.0 + 4.0, rect.center().y),
+                        egui::Pos2::new(rect.left() + 8.0 + metrics::ICON_SIZE + 6.0, rect.center().y),
                         egui::Align2::LEFT_CENTER,
                         &name,
                         metrics::TEXT_BODY,
@@ -584,16 +588,6 @@ impl RustyGitApp {
                 }
             });
         });
-
-        // Bottom hairline of the top bar.
-        let clip = ui.clip_rect();
-        ui.painter().line_segment(
-            [
-                egui::Pos2::new(clip.left(), clip.bottom() - 0.5),
-                egui::Pos2::new(clip.right(), clip.bottom() - 0.5),
-            ],
-            egui::Stroke::new(1.0, tokens::HAIRLINE),
-        );
     }
 
     fn render_bottom_bar(&mut self, ui: &mut egui::Ui) {
@@ -604,7 +598,28 @@ impl RustyGitApp {
             }
         }
 
-        ui.horizontal(|ui| {
+        ui.horizontal_centered(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(_repo) = &self.repo_path {
+                    if self.is_git_repo {
+                        let total_changed = self.git_status.staged.len()
+                            + self.git_status.unstaged.len()
+                            + self.git_status.untracked.len();
+                        ui.label(
+                            RichText::new(format!("Changes: {} files", total_changed))
+                                .size(metrics::TEXT_SMALL)
+                                .color(tokens::TEXT_FAINT),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("Not a Git repository")
+                                .color(tokens::ACCENT)
+                                .size(metrics::TEXT_SMALL),
+                        );
+                    }
+                }
+            });
+
             if let Some((msg, is_error, _created_at)) = &self.notification {
                 let (icon, color) = if *is_error {
                     (icons::Icon::Warn, tokens::DANGER_TEXT)
@@ -634,119 +649,74 @@ impl RustyGitApp {
                         .color(tokens::TEXT_FAINT),
                 );
             }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(_repo) = &self.repo_path {
-                    if self.is_git_repo {
-                        let total_changed = self.git_status.staged.len()
-                            + self.git_status.unstaged.len()
-                            + self.git_status.untracked.len();
-                        ui.label(
-                            RichText::new(format!("Changes: {} files", total_changed))
-                                .size(metrics::TEXT_SMALL)
-                                .color(tokens::TEXT_FAINT),
-                        );
-                    } else {
-                        ui.label(
-                            RichText::new("Not a Git repository")
-                                .color(tokens::ACCENT)
-                                .size(metrics::TEXT_SMALL),
-                        );
-                    }
-                }
-            });
         });
-
-        // Top hairline of the status bar.
-        let clip = ui.clip_rect();
-        ui.painter().line_segment(
-            [
-                egui::Pos2::new(clip.left(), clip.top() + 0.5),
-                egui::Pos2::new(clip.right(), clip.top() + 0.5),
-            ],
-            egui::Stroke::new(1.0, tokens::HAIRLINE),
-        );
     }
 
     fn render_sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.with_layout(
-            egui::Layout::top_down(egui::Align::LEFT),
-            |ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(metrics::SP_XS, metrics::SP_XS * 0.75);
-
-                if !self.is_git_repo {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(metrics::SP_LG);
-                        let (icon_rect, _) = ui.allocate_exact_size(
-                            Vec2::splat(metrics::ICON_LOGO * 2.0),
-                            egui::Sense::hover(),
-                        );
-                        icons::paint(
-                            ui.painter(),
-                            icons::glyph_in(icon_rect, metrics::ICON_LOGO * 1.6),
-                            icons::Icon::Branch,
-                            tokens::TEXT_FAINT,
-                        );
-                        ui.add_space(metrics::SP_SM);
-                        ui.label(
-                            RichText::new("Not in a Git repository")
-                                .strong()
-                                .size(metrics::TEXT_BODY)
-                                .color(tokens::TEXT),
-                        );
-                        ui.add_space(metrics::SP_SM);
-                        if widgets::text_button(
-                            ui,
-                            Some(icons::Icon::Branch),
-                            "Initialize Git Here",
-                            Btn::Primary,
-                            true,
-                        )
-                        .clicked()
-                        {
-                            if let Some(dir) = self.repo_path.clone() {
-                                if let Err(e) = git::init_repo(&dir) {
-                                    self.notify_error(format!("Failed to init: {}", e));
-                                } else {
-                                    self.notify_success("Initialized Git repository!");
-                                    self.set_repo(dir);
-                                }
-                            }
+        if !self.is_git_repo {
+            ui.vertical_centered(|ui| {
+                ui.add_space(metrics::SP_LG);
+                let (icon_rect, _) = ui.allocate_exact_size(
+                    Vec2::splat(metrics::ICON_LOGO * 2.0),
+                    egui::Sense::hover(),
+                );
+                icons::paint(
+                    ui.painter(),
+                    icons::glyph_in(icon_rect, metrics::ICON_LOGO * 1.6),
+                    icons::Icon::Branch,
+                    tokens::TEXT_FAINT,
+                );
+                ui.add_space(metrics::SP_SM);
+                ui.label(
+                    RichText::new("Not in a Git repository")
+                        .strong()
+                        .size(metrics::TEXT_BODY)
+                        .color(tokens::TEXT),
+                );
+                ui.add_space(metrics::SP_SM);
+                if widgets::text_button(
+                    ui,
+                    Some(icons::Icon::Branch),
+                    "Initialize Git Here",
+                    Btn::Primary,
+                    true,
+                )
+                .clicked()
+                {
+                    if let Some(dir) = self.repo_path.clone() {
+                        if let Err(e) = git::init_repo(&dir) {
+                            self.notify_error(format!("Failed to init: {}", e));
+                        } else {
+                            self.notify_success("Initialized Git repository!");
+                            self.set_repo(dir);
                         }
-                    });
-                    return;
+                    }
                 }
+            });
+            return;
+        }
 
-                // Tab rail.
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
-                    let changes_badge = self.git_status.staged.len()
-                        + self.git_status.unstaged.len()
-                        + self.git_status.untracked.len();
-                    let changes_label = if changes_badge > 0 {
-                        format!("Changes ({})", changes_badge)
-                    } else {
-                        "Changes".into()
-                    };
+        // Tab rail.
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(3.0, 0.0);
+            let changes_badge = self.git_status.staged.len()
+                + self.git_status.unstaged.len()
+                + self.git_status.untracked.len();
+            let changes_label = if changes_badge > 0 {
+                format!("Changes ({})", changes_badge)
+            } else {
+                "Changes".into()
+            };
 
-                    self.tab_rail(ui, &changes_label, MainTab::Changes);
-                    self.tab_rail(ui, "Branches", MainTab::Branches);
-                    self.tab_rail(ui, "History", MainTab::History);
-                    self.tab_rail(ui, "Files", MainTab::Files);
-                });
-            },
-        );
+            self.tab_rail(ui, &changes_label, MainTab::Changes);
+            self.tab_rail(ui, "Branches", MainTab::Branches);
+            self.tab_rail(ui, "History", MainTab::History);
+            self.tab_rail(ui, "Files", MainTab::Files);
+        });
 
-        // Hairline under the tab rail, then the tab's content in its own scope.
-        let rail_h = ui.min_rect().bottom();
-        ui.painter().line_segment(
-            [
-                egui::Pos2::new(ui.min_rect().left() + 0.0, rail_h + metrics::SP_XS),
-                egui::Pos2::new(ui.min_rect().right(), rail_h + metrics::SP_XS),
-            ],
-            egui::Stroke::new(1.0, tokens::HAIRLINE),
-        );
-        ui.add_space(metrics::SP_MD);
+        ui.add_space(metrics::SP_XS);
+        ui.separator();
+        ui.add_space(metrics::SP_XS);
 
         match self.selected_tab {
             MainTab::Changes => self.render_changes_tab(ui),
@@ -765,15 +735,21 @@ impl RustyGitApp {
             tokens::TEXT_MUTED
         };
         let gal = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), text_color);
-        let w = gal.size().x + metrics::SP_SM + metrics::SP_SM;
-        let h = metrics::CTRL_H;
+        let w = gal.size().x + metrics::SP_SM * 2.0;
+        let h = metrics::CTRL_H_SM + 2.0;
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), egui::Sense::click());
 
         let p = &ui.painter_at(rect);
         if selected {
             p.rect_filled(rect, tokens::RADIUS_CHIP, tokens::ACCENT_BG);
+            p.rect_stroke(
+                rect,
+                tokens::RADIUS_CHIP,
+                egui::Stroke::new(1.0, tokens::ACCENT),
+                egui::StrokeKind::Middle,
+            );
         } else if resp.hovered() {
-            p.rect_filled(rect, tokens::RADIUS_CHIP, tokens::SURFACE);
+            p.rect_filled(rect, tokens::RADIUS_CHIP, tokens::SURFACE_HI);
         }
         if resp.has_focus() {
             p.rect_stroke(
@@ -783,7 +759,9 @@ impl RustyGitApp {
                 egui::StrokeKind::Middle,
             );
         }
-        let color = if selected || resp.hovered() {
+        let color = if selected {
+            tokens::ACCENT
+        } else if resp.hovered() {
             tokens::TEXT
         } else {
             tokens::TEXT_MUTED
@@ -803,18 +781,19 @@ impl RustyGitApp {
     fn render_changes_tab(&mut self, ui: &mut egui::Ui) {
         let repo = self.repo_path.clone();
 
-        // One list scroll for both sections; the composer rests below it.
-        let avail = ui.available_height();
-        let list_h = (avail - metrics::COMPOSER_H).max(120.0);
-
         let mut staged_to_unstage = None;
         let mut staged_to_load = None;
         let mut unstaged_to_stage: Option<String> = None;
         let mut unstaged_to_discard: Option<(String, bool)> = None;
         let mut unstaged_to_load: Option<(String, bool, bool)> = None;
 
-        egui::ScrollArea::vertical()
+        let avail_h = ui.available_height();
+        let composer_h = metrics::COMPOSER_H;
+        let list_h = (avail_h - composer_h - metrics::SP_SM).max(60.0);
+
+        let scroll_resp = egui::ScrollArea::vertical()
             .id_salt("changes_scroll")
+            .auto_shrink([false, false])
             .max_height(list_h)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
@@ -851,7 +830,7 @@ impl RustyGitApp {
                         .as_ref()
                         .map(|s| s.path == file.path && s.is_staged)
                         .unwrap_or(false);
-                    let row_id = egui::Id::new(("staged_row", file.path.clone()));
+                    let row_id = ui.scope_id().with(("staged_row", &file.path));
                     let (clicked, action) = file_row(
                         ui,
                         row_id,
@@ -917,7 +896,7 @@ impl RustyGitApp {
                         .as_ref()
                         .map(|s| s.path == file.path && !s.is_staged)
                         .unwrap_or(false);
-                    let row_id = egui::Id::new(("unstaged_row", file.path.clone()));
+                    let row_id = ui.scope_id().with(("unstaged_row", &file.path));
                     let (clicked, action) = file_row(
                         ui,
                         row_id,
@@ -955,7 +934,7 @@ impl RustyGitApp {
                         .as_ref()
                         .map(|s| s.path == file.path && !s.is_staged)
                         .unwrap_or(false);
-                    let row_id = egui::Id::new(("untracked_row", file.path.clone()));
+                    let row_id = ui.scope_id().with(("untracked_row", &file.path));
                     let (clicked, action) = file_row(
                         ui,
                         row_id,
@@ -1020,8 +999,14 @@ impl RustyGitApp {
             }
         }
 
-        // Commit message composer, resting below the single list scroll.
+        // Keep composer docked at the bottom of the sidebar
+        let used_h = scroll_resp.inner_rect.height();
+        if used_h < list_h {
+            ui.add_space(list_h - used_h);
+        }
         ui.add_space(metrics::SP_SM);
+
+        // Commit message composer
         egui::Frame::NONE
             .fill(tokens::SURFACE)
             .corner_radius(tokens::RADIUS_WIDGET)
@@ -1088,35 +1073,38 @@ impl RustyGitApp {
                 .fill(tokens::SURFACE)
                 .corner_radius(tokens::RADIUS_WIDGET)
                 .inner_margin(egui::Margin::same(metrics::SP_SM as i8))
+                .stroke(egui::Stroke::new(1.0, tokens::HAIRLINE))
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let (icon_rect, _) = ui.allocate_exact_size(
-                            Vec2::splat(metrics::ICON_SIZE),
-                            egui::Sense::hover(),
-                        );
-                        icons::paint(
-                            ui.painter(),
-                            icons::glyph_in(icon_rect, metrics::ICON_SIZE),
-                            icons::Icon::Branch,
-                            tokens::ACCENT,
-                        );
-                        ui.label(
-                            RichText::new(&self.current_branch)
-                                .strong()
-                                .size(metrics::TEXT_BODY)
-                                .color(tokens::TEXT),
-                        );
-                    });
-                    if let Some(cur) = self.branches.iter().find(|b| b.is_current) {
-                        if let Some(up) = &cur.upstream {
-                            ui.label(
-                                RichText::new(format!("-> {}", up))
-                                    .weak()
-                                    .size(metrics::TEXT_SMALL)
-                                    .color(tokens::TEXT_FAINT),
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            let (icon_rect, _) = ui.allocate_exact_size(
+                                Vec2::splat(metrics::ICON_SIZE),
+                                egui::Sense::hover(),
                             );
+                            icons::paint(
+                                ui.painter(),
+                                icons::glyph_in(icon_rect, metrics::ICON_SIZE),
+                                icons::Icon::Branch,
+                                tokens::ACCENT,
+                            );
+                            ui.label(
+                                RichText::new(&self.current_branch)
+                                    .strong()
+                                    .size(metrics::TEXT_BODY)
+                                    .color(tokens::TEXT),
+                            );
+                        });
+                        if let Some(cur) = self.branches.iter().find(|b| b.is_current) {
+                            if let Some(up) = &cur.upstream {
+                                ui.label(
+                                    RichText::new(format!("Tracks: {}", up))
+                                        .weak()
+                                        .size(metrics::TEXT_SMALL)
+                                        .color(tokens::TEXT_FAINT),
+                                );
+                            }
                         }
-                    }
+                    });
                 });
             ui.add_space(metrics::SP_SM);
         }
@@ -1127,9 +1115,22 @@ impl RustyGitApp {
             self.new_branch_name.clear();
         }
 
+        ui.add_space(metrics::SP_SM);
+        let local_count = self.branches.iter().filter(|b| !b.is_remote).count();
+        let remote_count = self.branches.iter().filter(|b| b.is_remote).count();
+        ui.label(
+            RichText::new(format!("Local branches: {}", local_count))
+                .size(metrics::TEXT_SMALL)
+                .color(tokens::TEXT_MUTED),
+        );
+        ui.label(
+            RichText::new(format!("Remote branches: {}", remote_count))
+                .size(metrics::TEXT_SMALL)
+                .color(tokens::TEXT_MUTED),
+        );
         ui.add_space(metrics::SP_XS);
         ui.label(
-            RichText::new("The branch lists open in the centre panel.")
+            RichText::new("Manage and switch branches in the central view.")
                 .weak()
                 .size(metrics::TEXT_SMALL)
                 .color(tokens::TEXT_FAINT),
@@ -1169,6 +1170,7 @@ impl RustyGitApp {
 
         egui::ScrollArea::vertical()
             .id_salt("history_scroll")
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
                 if commits.is_empty() {
@@ -1185,7 +1187,7 @@ impl RustyGitApp {
                             .as_ref()
                             .map(|s| s.hash == c.hash)
                             .unwrap_or(false);
-                        let row_id = egui::Id::new(("history_row", c.hash.clone()));
+                        let row_id = ui.scope_id().with(("history_row", &c.hash));
                         if commit_row(ui, row_id, &c, is_selected) {
                             commit_to_select = Some(c.clone());
                         }
@@ -1215,6 +1217,7 @@ impl RustyGitApp {
 
         egui::ScrollArea::vertical()
             .id_salt("files_tree_scroll")
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
                 render_dir_tree(ui, repo, repo, &mut file_to_read);
@@ -1230,7 +1233,28 @@ impl RustyGitApp {
             MainTab::Changes => {
                 if let Some(sel) = &self.selected_file {
                     ui.horizontal(|ui| {
-                        // Status pill (live status chip: sentence case).
+                        // 1. Right-side diff statistics first
+                        if let Some(diff) = &self.current_diff {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(format!("-{}", diff.deletions))
+                                            .monospace()
+                                            .strong()
+                                            .color(tokens::DANGER_TEXT),
+                                    );
+                                    ui.label(
+                                        RichText::new(format!("+{}", diff.additions))
+                                            .monospace()
+                                            .strong()
+                                            .color(tokens::SUCCESS),
+                                    );
+                                },
+                            );
+                        }
+
+                        // 2. Status pill and file path
                         let (label, fg, bg) = if sel.is_staged {
                             ("Staged", tokens::SUCCESS, tokens::ADD_BG)
                         } else if sel.is_untracked {
@@ -1249,26 +1273,6 @@ impl RustyGitApp {
                             )
                             .truncate(),
                         );
-
-                        if let Some(diff) = &self.current_diff {
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(
-                                        RichText::new(format!("+{}", diff.additions))
-                                            .monospace()
-                                            .strong()
-                                            .color(tokens::SUCCESS),
-                                    );
-                                    ui.label(
-                                        RichText::new(format!("-{}", diff.deletions))
-                                            .monospace()
-                                            .strong()
-                                            .color(tokens::DANGER_TEXT),
-                                    );
-                                },
-                            );
-                        }
                     });
                     ui.add_space(metrics::SP_2XS);
                     ui.separator();
@@ -1301,17 +1305,9 @@ impl RustyGitApp {
                         .fill(tokens::SURFACE)
                         .corner_radius(tokens::RADIUS_WIDGET)
                         .inner_margin(egui::Margin::same(metrics::SP_SM as i8))
+                        .stroke(egui::Stroke::new(1.0, tokens::HAIRLINE))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&c.summary)
-                                            .strong()
-                                            .heading()
-                                            .color(tokens::TEXT),
-                                    )
-                                    .truncate(),
-                                );
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
@@ -1323,6 +1319,16 @@ impl RustyGitApp {
                                             true,
                                         );
                                     },
+                                );
+
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&c.summary)
+                                            .strong()
+                                            .heading()
+                                            .color(tokens::TEXT),
+                                    )
+                                    .truncate(),
                                 );
                             });
 
@@ -1423,19 +1429,24 @@ impl RustyGitApp {
                 }
             }
             MainTab::Branches => {
-                // The live branch lists — moved here (wide rows, room to read).
-                ui.label(
-                    RichText::new("Branch Manager")
-                        .strong()
-                        .heading()
-                        .color(tokens::TEXT),
-                );
+                // The live branch lists — wide rows in center panel
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Branch Manager")
+                            .strong()
+                            .heading()
+                            .color(tokens::TEXT),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::text_button(ui, Some(icons::Icon::Plus), "New Branch", Btn::Primary, true).clicked()
+                        {
+                            self.show_new_branch_modal = true;
+                            self.new_branch_name.clear();
+                        }
+                    });
+                });
                 ui.add_space(metrics::SP_2XS);
-                if widgets::text_button(ui, Some(icons::Icon::Plus), "New Branch", Btn::Soft, true).clicked()
-                {
-                    self.show_new_branch_modal = true;
-                    self.new_branch_name.clear();
-                }
+                ui.separator();
                 ui.add_space(metrics::SP_SM);
 
                 let mut branch_to_checkout = None;
@@ -1443,6 +1454,7 @@ impl RustyGitApp {
 
                 egui::ScrollArea::vertical()
                     .id_salt("branches_scroll")
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
 
@@ -1453,7 +1465,7 @@ impl RustyGitApp {
                                 .color(tokens::TEXT_MUTED),
                         );
                         for b in self.branches.iter().filter(|b| !b.is_remote) {
-                            let row_id = egui::Id::new(("local_branch", b.name.clone()));
+                            let row_id = ui.scope_id().with(("local_branch", &b.name));
                             let (checkout, delete) = branch_row(
                                 ui,
                                 row_id,
@@ -1478,7 +1490,7 @@ impl RustyGitApp {
                                 .color(tokens::TEXT_MUTED),
                         );
                         for b in self.branches.iter().filter(|b| b.is_remote) {
-                            let row_id = egui::Id::new(("remote_branch", b.name.clone()));
+                            let row_id = ui.scope_id().with(("remote_branch", &b.name));
                             let (checkout, delete) = branch_row(
                                 ui,
                                 row_id,
@@ -1512,15 +1524,6 @@ impl RustyGitApp {
                     (&self.file_view_path.clone(), &self.file_view_content.clone())
                 {
                     ui.horizontal(|ui| {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(path.clone())
-                                    .heading()
-                                    .strong()
-                                    .color(tokens::TEXT),
-                            )
-                            .truncate(),
-                        );
                         ui.with_layout(
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
@@ -1531,6 +1534,16 @@ impl RustyGitApp {
                                         .color(tokens::TEXT_FAINT),
                                 );
                             },
+                        );
+
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(path.clone())
+                                    .heading()
+                                    .strong()
+                                    .color(tokens::TEXT),
+                            )
+                            .truncate(),
                         );
                     });
                     ui.add_space(metrics::SP_2XS);
@@ -1781,22 +1794,20 @@ fn file_row(
         );
     }
 
-    // Status chip.
+    // Status chip: clean 20x18 badge with centered letter and subtle border
     let st = crate::theme::status_style(status_char);
+    let chip_h = 18.0;
+    let chip_w = 20.0;
     let chip_r = egui::Rect::from_min_size(
-        egui::Pos2::new(rect.left() + metrics::SP_2XS, rect.top() + 6.0),
-        Vec2::new(18.0, metrics::ROW_H - metrics::SP_MD),
+        egui::Pos2::new(rect.left() + metrics::SP_2XS, rect.center().y - chip_h * 0.5),
+        Vec2::new(chip_w, chip_h),
     );
     p.rect_filled(chip_r, tokens::RADIUS_CHIP, st.bg);
-    // Kind strip inside the chip's left edge — file rows share the diff rows'
-    // status bar language (one pair of tokens per status letter).
-    p.rect_filled(
-        egui::Rect::from_min_size(
-            egui::Pos2::new(chip_r.left(), chip_r.top() + 2.0),
-            Vec2::new(2.0, chip_r.height() - 4.0),
-        ),
+    p.rect_stroke(
+        chip_r,
         tokens::RADIUS_CHIP,
-        st.bar,
+        egui::Stroke::new(1.0, st.bar),
+        egui::StrokeKind::Middle,
     );
     p.text(
         chip_r.center(),
@@ -1806,27 +1817,14 @@ fn file_row(
         st.fg,
     );
 
-    // Path.
-    let text_x = chip_r.right() + metrics::SP_SM;
-    let max_w = rect.width() - (text_x - rect.left()) - metrics::SP_MD - btns.len() as f32 * metrics::CTRL_H_SM;
-    trunc_fit(
-        p,
-        egui::Pos2::new(text_x, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        path,
-        metrics::TEXT_BODY,
-        tokens::TEXT,
-        false,
-        max_w,
-    );
-
-    // Right-side icon actions in fixed cells.
+    // Right-side icon actions in fixed cells
     let mut action = None;
-    let mut x = rect.right() - metrics::SP_SM - metrics::CTRL_H_SM;
+    let btn_size = 24.0;
+    let mut x = rect.right() - 4.0 - btn_size;
     for (i, btn) in btns.iter().enumerate().rev() {
         let brect = egui::Rect::from_min_size(
-            egui::Pos2::new(x, rect.top() + 1.0),
-            Vec2::new(metrics::CTRL_H_SM, metrics::ROW_H - 2.0),
+            egui::Pos2::new(x, rect.center().y - btn_size * 0.5),
+            Vec2::splat(btn_size),
         );
         let brep = ui.interact(brect, row_id.with(i), egui::Sense::click());
         paint_hit_cell(
@@ -1835,15 +1833,35 @@ fn file_row(
             brep.hovered(),
             brep.is_pointer_button_down_on(),
             brep.has_focus(),
-            tokens::TEXT_MUTED,
+            tokens::SURFACE_HI,
             if brep.hovered() { tokens::TEXT } else { tokens::TEXT_MUTED },
         );
-        icons::paint(p, icons::glyph_in(brect, metrics::ICON_SIZE - 4.0), btn.icon, if brep.hovered() { tokens::TEXT } else { tokens::TEXT_MUTED });
+        icons::paint(
+            p,
+            icons::glyph_in(brect, metrics::ICON_SIZE - 2.0),
+            btn.icon,
+            if brep.hovered() { tokens::TEXT } else { tokens::TEXT_MUTED },
+        );
         if brep.on_hover_text(btn.hover).clicked() {
             action = Some(btn.action);
         }
-        x -= metrics::CTRL_H_SM;
+        x -= btn_size + 2.0;
     }
+
+    // Path truncated before buttons
+    let text_x = chip_r.right() + metrics::SP_XS;
+    let total_btn_w = btns.len() as f32 * (btn_size + 2.0) + 4.0;
+    let max_w = (rect.width() - (text_x - rect.left()) - total_btn_w - metrics::SP_2XS).max(10.0);
+    trunc_fit(
+        p,
+        egui::Pos2::new(text_x, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        path,
+        metrics::TEXT_BODY,
+        if selected { tokens::TEXT } else { tokens::TEXT },
+        false,
+        max_w,
+    );
 
     let clicked = action.is_none() && row.clicked();
     (clicked, action)
@@ -1865,20 +1883,10 @@ fn branch_row(
         (icons::Icon::Branch, if is_current { tokens::ACCENT } else { tokens::TEXT_FAINT })
     };
     let font = egui::FontId::proportional(metrics::TEXT_BODY);
-    let (up_w, has_up) = match upstream {
-        Some(_) => (92.0, true),
-        None => (0.0, false),
-    };
-    let btn_w: f32 = if is_current { 0.0 } else { metrics::CTRL_H_SM };
-    let name_w = ui.available_width()
-        - metrics::SP_MD
-        - metrics::ICON_SIZE
-        - metrics::SP_SM
-        - up_w
-        - btn_w * (if is_current { 0.0 } else { 2.0 });
     let row_w = ui.available_width();
+    let row_h = metrics::ROW_H + 6.0;
     let (rect, row) = ui.allocate_exact_size(
-        Vec2::new(row_w, metrics::ROW_H + 6.0),
+        Vec2::new(row_w, row_h),
         egui::Sense::click(),
     );
     let p = &ui.painter_at(rect);
@@ -1889,11 +1897,12 @@ fn branch_row(
         p.rect_filled(rect, tokens::RADIUS_CHIP, tokens::SURFACE);
     }
 
+    // Branch icon on left
     icons::paint(
         p,
         icons::glyph_in(
             egui::Rect::from_min_size(
-                egui::Pos2::new(rect.left() + metrics::SP_MD, rect.top() + 3.0),
+                egui::Pos2::new(rect.left() + metrics::SP_SM, rect.center().y - metrics::ICON_SIZE * 0.5),
                 Vec2::splat(metrics::ICON_SIZE),
             ),
             metrics::ICON_SIZE,
@@ -1902,58 +1911,47 @@ fn branch_row(
         glyph.1,
     );
 
-    trunc_fit(
-        p,
-        egui::Pos2::new(
-            rect.left() + metrics::SP_MD + metrics::ICON_SIZE + metrics::SP_SM,
-            rect.center().y,
-        ),
-        egui::Align2::LEFT_CENTER,
-        name,
-        metrics::TEXT_BODY,
-        if is_current { tokens::ACCENT } else { tokens::TEXT },
-        false,
-        name_w,
-    );
-    if is_current {
-        widgets::paint_text(
-            p,
-            egui::Pos2::new(
-                rect.left() + metrics::SP_MD + metrics::ICON_SIZE + metrics::SP_SM
-                    + name_w + metrics::SP_2XS,
-                rect.center().y,
-            ),
-            egui::Align2::LEFT_CENTER,
-            "current",
-            metrics::TEXT_SMALL,
-            tokens::ACCENT,
-            false,
-        );
-    }
-
-    if has_up {
-        widgets::paint_text(
-            p,
-            egui::Pos2::new(rect.right() - metrics::SP_MD - up_w - metrics::SP_SM - metrics::CTRL_H_SM * 2.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            &format!("-> {}", upstream.unwrap_or("")),
-            metrics::TEXT_SMALL,
-            tokens::TEXT_FAINT,
-            false,
-        );
-    }
-
     let mut checkout = None;
     let mut delete = None;
+
+    // Right-aligned actions
+    let mut cur_right = rect.right() - metrics::SP_SM;
+
     if !is_current {
-        // Checkout button (text).
+        // Trash button (delete branch)
+        let trash_w = metrics::CTRL_H_SM;
+        let trect = egui::Rect::from_min_size(
+            egui::Pos2::new(cur_right - trash_w, rect.center().y - metrics::ROW_H * 0.5),
+            Vec2::new(trash_w, metrics::ROW_H),
+        );
+        let trep = ui.interact(trect, row_id.with(1), egui::Sense::click());
+        paint_hit_cell(
+            p,
+            trect,
+            trep.hovered(),
+            trep.is_pointer_button_down_on(),
+            trep.has_focus(),
+            tokens::SURFACE_HI,
+            if trep.hovered() { tokens::DANGER_TEXT } else { tokens::TEXT_MUTED },
+        );
+        icons::paint(
+            p,
+            icons::glyph_in(trect, metrics::ICON_SIZE - 2.0),
+            icons::Icon::Trash,
+            if trep.hovered() { tokens::DANGER_TEXT } else { tokens::TEXT_MUTED },
+        );
+        if trep.on_hover_text("Delete branch").clicked() {
+            delete = Some(name.to_string());
+        }
+        cur_right -= trash_w + metrics::SP_XS;
+
+        // Checkout button
         let label = if is_remote { "Track / Checkout" } else { "Checkout" };
+        let btn_text_w = p.layout_no_wrap(label.to_owned(), font.clone(), tokens::TEXT).size().x;
+        let btn_w = btn_text_w + 16.0;
         let btn_rect = egui::Rect::from_min_size(
-            egui::Pos2::new(
-                rect.right() - metrics::SP_MD - btn_w - (if is_remote { 108.0 } else { 70.0 }),
-                rect.top() + 3.0,
-            ),
-            Vec2::new(if is_remote { 108.0 } else { 70.0 }, metrics::ROW_H),
+            egui::Pos2::new(cur_right - btn_w, rect.center().y - metrics::ROW_H * 0.5),
+            Vec2::new(btn_w, metrics::ROW_H),
         );
         let brep = ui.interact(btn_rect, row_id.with(0), egui::Sense::click());
         paint_hit_cell(
@@ -1962,7 +1960,7 @@ fn branch_row(
             brep.hovered(),
             brep.is_pointer_button_down_on(),
             brep.has_focus(),
-            tokens::SURFACE,
+            tokens::SURFACE_HI,
             if brep.hovered() { tokens::TEXT } else { tokens::TEXT_MUTED },
         );
         p.text(
@@ -1975,37 +1973,66 @@ fn branch_row(
         if brep.on_hover_text(label).clicked() {
             checkout = Some(name.to_string());
         }
-
-        // Trash button.
-        let trect = egui::Rect::from_min_size(
-            egui::Pos2::new(
-                rect.right() - metrics::SP_MD - metrics::CTRL_H_SM,
-                rect.top() + 3.0,
-            ),
-            Vec2::new(metrics::CTRL_H_SM, metrics::ROW_H),
-        );
-        let trep = ui.interact(trect, row_id.with(1), egui::Sense::click());
-        paint_hit_cell(
-            p,
-            trect,
-            trep.hovered(),
-            trep.is_pointer_button_down_on(),
-            trep.has_focus(),
-            tokens::SURFACE,
-            if trep.hovered() { tokens::DANGER_TEXT } else { tokens::TEXT_MUTED },
-        );
-        icons::paint(
-            p,
-            icons::glyph_in(trect, metrics::ICON_SIZE - 2.0),
-            icons::Icon::Trash,
-            if trep.hovered() { tokens::DANGER_TEXT } else { tokens::TEXT_MUTED },
-        );
-        if trep.on_hover_text("Delete branch").clicked() {
-            delete = Some(name.to_string());
-        }
+        cur_right -= btn_w + metrics::SP_SM;
     }
 
-    let _ = has_up;
+    // Upstream tracking text
+    if let Some(up) = upstream {
+        let up_str = format!("-> {}", up);
+        let up_w = p.layout_no_wrap(up_str.clone(), egui::FontId::proportional(metrics::TEXT_SMALL), tokens::TEXT_FAINT).size().x;
+        widgets::paint_text(
+            p,
+            egui::Pos2::new(cur_right - up_w, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &up_str,
+            metrics::TEXT_SMALL,
+            tokens::TEXT_FAINT,
+            false,
+        );
+        cur_right -= up_w + metrics::SP_MD;
+    }
+
+    // Branch name & "current" badge
+    let text_x = rect.left() + metrics::SP_SM + metrics::ICON_SIZE + metrics::SP_SM;
+    let name_font = egui::FontId::proportional(metrics::TEXT_BODY);
+    let name_size = p.layout_no_wrap(name.to_owned(), name_font, tokens::TEXT).size().x;
+    let badge_w = if is_current { 60.0 } else { 0.0 };
+    let max_name_w = (cur_right - text_x - badge_w - metrics::SP_XS).max(20.0);
+
+    let actual_name_w = name_size.min(max_name_w);
+    trunc_fit(
+        p,
+        egui::Pos2::new(text_x, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        name,
+        metrics::TEXT_BODY,
+        if is_current { tokens::ACCENT } else { tokens::TEXT },
+        false,
+        max_name_w,
+    );
+
+    if is_current {
+        let badge_x = text_x + actual_name_w + metrics::SP_SM;
+        let badge_rect = egui::Rect::from_min_size(
+            egui::Pos2::new(badge_x, rect.center().y - 9.0),
+            Vec2::new(54.0, 18.0),
+        );
+        p.rect_filled(badge_rect, tokens::RADIUS_CHIP, tokens::ACCENT_BG);
+        p.rect_stroke(
+            badge_rect,
+            tokens::RADIUS_CHIP,
+            egui::Stroke::new(1.0, tokens::ACCENT),
+            egui::StrokeKind::Middle,
+        );
+        p.text(
+            badge_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "current",
+            egui::FontId::proportional(metrics::TEXT_SMALL),
+            tokens::ACCENT,
+        );
+    }
+
     (checkout, delete)
 }
 
@@ -2038,7 +2065,8 @@ fn paint_hit_cell(
 /// short hash right-aligned on the top line (no dotted meta joins, 63).
 fn commit_row(ui: &mut egui::Ui, _row_id: egui::Id, c: &CommitInfo, selected: bool) -> bool {
     let w = ui.available_width();
-    let (rect, row) = ui.allocate_exact_size(Vec2::new(w, 40.0), egui::Sense::click());
+    let row_h = 44.0;
+    let (rect, row) = ui.allocate_exact_size(Vec2::new(w, row_h), egui::Sense::click());
     let p = &ui.painter_at(rect);
 
     if selected {
@@ -2056,9 +2084,11 @@ fn commit_row(ui: &mut egui::Ui, _row_id: egui::Id, c: &CommitInfo, selected: bo
     }
 
     // Hash, right-aligned, top line.
+    let hash_font = egui::FontId::monospace(metrics::TEXT_SMALL);
+    let hash_w = p.layout_no_wrap(c.short_hash.clone(), hash_font, tokens::TEXT_FAINT).size().x;
     widgets::paint_text(
         p,
-        egui::Pos2::new(rect.right() - metrics::SP_SM, rect.top() + 8.0),
+        egui::Pos2::new(rect.right() - metrics::SP_SM, rect.top() + 12.0),
         egui::Align2::RIGHT_CENTER,
         &c.short_hash,
         metrics::TEXT_SMALL,
@@ -2066,35 +2096,41 @@ fn commit_row(ui: &mut egui::Ui, _row_id: egui::Id, c: &CommitInfo, selected: bo
         true,
     );
 
-    let hash_w = p.layout_no_wrap(c.short_hash.clone(), egui::FontId::monospace(metrics::TEXT_SMALL), tokens::TEXT_FAINT).size().x;
+    let summary_max_w = (rect.width() - 2.0 * metrics::SP_SM - hash_w - metrics::SP_SM).max(10.0);
     trunc_fit(
         p,
-        egui::Pos2::new(rect.left() + metrics::SP_SM, rect.top() + 8.0),
+        egui::Pos2::new(rect.left() + metrics::SP_SM, rect.top() + 12.0),
         egui::Align2::LEFT_CENTER,
         &c.summary,
         metrics::TEXT_BODY,
         if selected { tokens::TEXT } else { tokens::TEXT },
         false,
-        w - 2.0 * metrics::SP_SM - hash_w - metrics::SP_SM,
+        summary_max_w,
     );
 
+    // Bottom line: Date on right, Author on left.
+    let date_font = egui::FontId::proportional(metrics::TEXT_SMALL);
+    let date_w = p.layout_no_wrap(c.date.clone(), date_font, tokens::TEXT_FAINT).size().x;
     widgets::paint_text(
         p,
-        egui::Pos2::new(rect.left() + metrics::SP_SM, rect.bottom() - 10.0),
-        egui::Align2::LEFT_CENTER,
-        &c.author_name,
-        metrics::TEXT_SMALL,
-        tokens::TEXT_MUTED,
-        false,
-    );
-    widgets::paint_text(
-        p,
-        egui::Pos2::new(rect.right() - metrics::SP_SM, rect.bottom() - 10.0),
+        egui::Pos2::new(rect.right() - metrics::SP_SM, rect.bottom() - 12.0),
         egui::Align2::RIGHT_CENTER,
         &c.date,
         metrics::TEXT_SMALL,
         tokens::TEXT_FAINT,
         false,
+    );
+
+    let author_max_w = (rect.width() - 2.0 * metrics::SP_SM - date_w - metrics::SP_SM).max(10.0);
+    trunc_fit(
+        p,
+        egui::Pos2::new(rect.left() + metrics::SP_SM, rect.bottom() - 12.0),
+        egui::Align2::LEFT_CENTER,
+        &c.author_name,
+        metrics::TEXT_SMALL,
+        tokens::TEXT_MUTED,
+        false,
+        author_max_w,
     );
 
     row.clicked()
