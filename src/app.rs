@@ -696,9 +696,11 @@ impl RustyGitApp {
             return;
         }
 
+        ui.add_space(metrics::SP_XS);
+
         // Tab rail.
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(3.0, 0.0);
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
             let changes_badge = self.git_status.staged.len()
                 + self.git_status.unstaged.len()
                 + self.git_status.untracked.len();
@@ -714,9 +716,9 @@ impl RustyGitApp {
             self.tab_rail(ui, "Files", MainTab::Files);
         });
 
-        ui.add_space(metrics::SP_XS);
+        ui.add_space(metrics::SP_SM);
         ui.separator();
-        ui.add_space(metrics::SP_XS);
+        ui.add_space(metrics::SP_SM);
 
         match self.selected_tab {
             MainTab::Changes => self.render_changes_tab(ui),
@@ -735,28 +737,34 @@ impl RustyGitApp {
             tokens::TEXT_MUTED
         };
         let gal = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), text_color);
-        let w = gal.size().x + metrics::SP_SM * 2.0;
-        let h = metrics::CTRL_H_SM + 2.0;
+        let w = gal.size().x + metrics::SP_MD + metrics::SP_SM;
+        let h = metrics::CTRL_H_SM + 4.0;
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), egui::Sense::click());
 
-        let p = &ui.painter_at(rect);
+        let p = ui.painter();
         if selected {
             p.rect_filled(rect, tokens::RADIUS_CHIP, tokens::ACCENT_BG);
             p.rect_stroke(
-                rect,
+                rect.shrink(0.5),
                 tokens::RADIUS_CHIP,
                 egui::Stroke::new(1.0, tokens::ACCENT),
-                egui::StrokeKind::Middle,
+                egui::StrokeKind::Inside,
             );
         } else if resp.hovered() {
             p.rect_filled(rect, tokens::RADIUS_CHIP, tokens::SURFACE_HI);
+            p.rect_stroke(
+                rect.shrink(0.5),
+                tokens::RADIUS_CHIP,
+                egui::Stroke::new(1.0, tokens::HAIRLINE),
+                egui::StrokeKind::Inside,
+            );
         }
         if resp.has_focus() {
             p.rect_stroke(
-                rect.expand(1.0),
+                rect.shrink(0.5),
                 tokens::RADIUS_CHIP,
                 egui::Stroke::new(1.5, tokens::ACCENT),
-                egui::StrokeKind::Middle,
+                egui::StrokeKind::Inside,
             );
         }
         let color = if selected {
@@ -817,7 +825,16 @@ impl RustyGitApp {
                         .clicked()
                         {
                             if let Some(r) = &repo {
-                                let _ = git::unstage_all(r);
+                                if let Err(e) = git::unstage_all(r) {
+                                    self.notify_error(format!("Failed to unstage all: {}", e));
+                                } else {
+                                    self.notify_success("Unstaged all changes");
+                                    if let Some(sel) = &mut self.selected_file {
+                                        if sel.is_staged {
+                                            sel.is_staged = false;
+                                        }
+                                    }
+                                }
                                 self.trigger_refresh();
                             }
                         }
@@ -883,7 +900,17 @@ impl RustyGitApp {
                         .clicked()
                         {
                             if let Some(r) = &repo {
-                                let _ = git::stage_all(r);
+                                if let Err(e) = git::stage_all(r) {
+                                    self.notify_error(format!("Failed to stage all: {}", e));
+                                } else {
+                                    self.notify_success("Staged all changes");
+                                    if let Some(sel) = &mut self.selected_file {
+                                        if !sel.is_staged {
+                                            sel.is_staged = true;
+                                            sel.is_untracked = false;
+                                        }
+                                    }
+                                }
                                 self.trigger_refresh();
                             }
                         }
@@ -982,7 +1009,17 @@ impl RustyGitApp {
         }
         if let Some(p) = unstaged_to_stage {
             if let Some(r) = &repo {
-                let _ = git::stage_files(r, &[p]);
+                if let Err(e) = git::stage_files(r, &[p.clone()]) {
+                    self.notify_error(format!("Failed to stage {}: {}", p, e));
+                } else {
+                    self.notify_success(format!("Staged {}", p));
+                    if let Some(sel) = &mut self.selected_file {
+                        if sel.path == p && !sel.is_staged {
+                            sel.is_staged = true;
+                            sel.is_untracked = false;
+                        }
+                    }
+                }
                 self.trigger_refresh();
             }
         }
@@ -994,7 +1031,16 @@ impl RustyGitApp {
         }
         if let Some(p) = staged_to_unstage {
             if let Some(r) = &repo {
-                let _ = git::unstage_files(r, &[p]);
+                if let Err(e) = git::unstage_files(r, &[p.clone()]) {
+                    self.notify_error(format!("Failed to unstage {}: {}", p, e));
+                } else {
+                    self.notify_success(format!("Unstaged {}", p));
+                    if let Some(sel) = &mut self.selected_file {
+                        if sel.path == p && sel.is_staged {
+                            sel.is_staged = false;
+                        }
+                    }
+                }
                 self.trigger_refresh();
             }
         }
@@ -1773,24 +1819,33 @@ fn file_row(
     btns: &[RowBtn],
 ) -> (bool, Option<RowAction>) {
     let w = ui.available_width();
-    let (rect, row) = ui.allocate_exact_size(
+    let (rect, _) = ui.allocate_exact_size(
         Vec2::new(w, metrics::ROW_H),
-        egui::Sense::click(),
+        egui::Sense::hover(),
     );
-    let p = &ui.painter_at(rect);
 
-    let row_hover = row.hovered();
+    let btn_size = 24.0;
+    let total_btn_w = btns.len() as f32 * (btn_size + 2.0) + 4.0;
+    let click_w = (rect.width() - total_btn_w).max(0.0);
+    let row_click_rect = egui::Rect::from_min_size(
+        rect.min,
+        Vec2::new(click_w, rect.height()),
+    );
+    let row_resp = ui.interact(row_click_rect, row_id.with("row_click"), egui::Sense::click());
+
+    let row_hover = row_resp.hovered();
+    let p = ui.painter();
     if selected {
         p.rect_filled(rect, tokens::RADIUS_CHIP, tokens::ACCENT_BG);
     } else if row_hover {
         p.rect_filled(rect, tokens::RADIUS_CHIP, tokens::SURFACE);
     }
-    if row.has_focus() {
+    if row_resp.has_focus() {
         p.rect_stroke(
-            rect,
+            rect.shrink(0.5),
             tokens::RADIUS_CHIP,
             egui::Stroke::new(1.0, tokens::ACCENT),
-            egui::StrokeKind::Middle,
+            egui::StrokeKind::Inside,
         );
     }
 
@@ -1804,10 +1859,10 @@ fn file_row(
     );
     p.rect_filled(chip_r, tokens::RADIUS_CHIP, st.bg);
     p.rect_stroke(
-        chip_r,
+        chip_r.shrink(0.5),
         tokens::RADIUS_CHIP,
         egui::Stroke::new(1.0, st.bar),
-        egui::StrokeKind::Middle,
+        egui::StrokeKind::Inside,
     );
     p.text(
         chip_r.center(),
@@ -1819,7 +1874,6 @@ fn file_row(
 
     // Right-side icon actions in fixed cells
     let mut action = None;
-    let btn_size = 24.0;
     let mut x = rect.right() - 4.0 - btn_size;
     for (i, btn) in btns.iter().enumerate().rev() {
         let brect = egui::Rect::from_min_size(
@@ -1827,6 +1881,10 @@ fn file_row(
             Vec2::splat(btn_size),
         );
         let brep = ui.interact(brect, row_id.with(i), egui::Sense::click());
+        if brep.clicked() {
+            action = Some(btn.action);
+        }
+        let brep = brep.on_hover_text(btn.hover);
         paint_hit_cell(
             p,
             brect,
@@ -1842,16 +1900,12 @@ fn file_row(
             btn.icon,
             if brep.hovered() { tokens::TEXT } else { tokens::TEXT_MUTED },
         );
-        if brep.on_hover_text(btn.hover).clicked() {
-            action = Some(btn.action);
-        }
         x -= btn_size + 2.0;
     }
 
     // Path truncated before buttons
     let text_x = chip_r.right() + metrics::SP_XS;
-    let total_btn_w = btns.len() as f32 * (btn_size + 2.0) + 4.0;
-    let max_w = (rect.width() - (text_x - rect.left()) - total_btn_w - metrics::SP_2XS).max(10.0);
+    let max_w = (click_w - (text_x - rect.left()) - metrics::SP_2XS).max(10.0);
     trunc_fit(
         p,
         egui::Pos2::new(text_x, rect.center().y),
@@ -1863,7 +1917,7 @@ fn file_row(
         max_w,
     );
 
-    let clicked = action.is_none() && row.clicked();
+    let clicked = action.is_none() && row_resp.clicked();
     (clicked, action)
 }
 

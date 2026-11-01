@@ -213,12 +213,28 @@ pub fn unstage_files(dir: &Path, files: &[String]) -> Result<()> {
     for f in files {
         args.push(f.as_str());
     }
-    run_git_cmd(dir, &args)?;
+    if let Err(e) = run_git_cmd(dir, &args) {
+        let mut reset_args = vec!["reset", "HEAD", "--"];
+        for f in files {
+            reset_args.push(f.as_str());
+        }
+        if let Err(_e2) = run_git_cmd(dir, &reset_args) {
+            let mut rm_args = vec!["rm", "--cached", "-r", "--"];
+            for f in files {
+                rm_args.push(f.as_str());
+            }
+            run_git_cmd(dir, &rm_args).context(format!("Failed to unstage files: {}", e))?;
+        }
+    }
     Ok(())
 }
 
 pub fn unstage_all(dir: &Path) -> Result<()> {
-    run_git_cmd(dir, &["restore", "--staged", "."])?;
+    if run_git_cmd(dir, &["restore", "--staged", "."]).is_err() {
+        if run_git_cmd(dir, &["reset", "HEAD", "."]).is_err() {
+            let _ = run_git_cmd(dir, &["rm", "--cached", "-r", "."]);
+        }
+    }
     Ok(())
 }
 
