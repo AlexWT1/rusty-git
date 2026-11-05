@@ -149,7 +149,10 @@ pub fn delete_branch(dir: &Path, name: &str, force: bool) -> Result<()> {
 }
 
 pub fn get_status(dir: &Path) -> Result<GitStatus> {
-    let out = run_git_cmd(dir, &["status", "--porcelain=v1", "-uall"])?;
+    let out = run_git_cmd(
+        dir,
+        &["-c", "core.quotepath=false", "status", "--porcelain=v1", "-uall"],
+    )?;
     let mut status = GitStatus::default();
 
     for line in out.lines() {
@@ -197,16 +200,29 @@ pub fn stage_files(dir: &Path, files: &[String]) -> Result<()> {
     if files.is_empty() {
         return Ok(());
     }
-    let mut args = vec!["add", "--"];
+    // Always operate relative to repository root to avoid pathspec mismatches
+    let root = get_repo_root(dir).unwrap_or_else(|_| dir.to_path_buf());
+
+    let mut clean_files = Vec::new();
     for f in files {
+        if let Some((_old_p, new_p)) = f.split_once(" -> ") {
+            clean_files.push(new_p.trim().trim_matches('"').to_string());
+        } else {
+            clean_files.push(f.trim().trim_matches('"').to_string());
+        }
+    }
+
+    let mut args = vec!["add", "--"];
+    for f in &clean_files {
         args.push(f.as_str());
     }
-    run_git_cmd(dir, &args)?;
+    run_git_cmd(&root, &args)?;
     Ok(())
 }
 
 pub fn stage_all(dir: &Path) -> Result<()> {
-    run_git_cmd(dir, &["add", "-A"])?;
+    let root = get_repo_root(dir).unwrap_or_else(|_| dir.to_path_buf());
+    run_git_cmd(&root, &["add", "-A"])?;
     Ok(())
 }
 
@@ -214,6 +230,9 @@ pub fn unstage_files(dir: &Path, files: &[String]) -> Result<()> {
     if files.is_empty() {
         return Ok(());
     }
+    // Always operate relative to repository root to avoid pathspec mismatches
+    let root = get_repo_root(dir).unwrap_or_else(|_| dir.to_path_buf());
+
     // Handle renamed files ("old -> new") and clean paths
     let mut clean_files = Vec::new();
     for f in files {
@@ -231,17 +250,17 @@ pub fn unstage_files(dir: &Path, files: &[String]) -> Result<()> {
         reset_args.push(f.as_str());
     }
 
-    if let Err(e) = run_git_cmd(dir, &reset_args) {
+    if let Err(e) = run_git_cmd(&root, &reset_args) {
         let mut restore_args = vec!["restore", "--staged", "--"];
         for f in &clean_files {
             restore_args.push(f.as_str());
         }
-        if let Err(e2) = run_git_cmd(dir, &restore_args) {
+        if let Err(e2) = run_git_cmd(&root, &restore_args) {
             let mut rm_args = vec!["rm", "--cached", "-r", "--"];
             for f in &clean_files {
                 rm_args.push(f.as_str());
             }
-            run_git_cmd(dir, &rm_args)
+            run_git_cmd(&root, &rm_args)
                 .with_context(|| format!("Failed to unstage files: {} / {}", e, e2))?;
         }
     }
@@ -249,10 +268,11 @@ pub fn unstage_files(dir: &Path, files: &[String]) -> Result<()> {
 }
 
 pub fn unstage_all(dir: &Path) -> Result<()> {
+    let root = get_repo_root(dir).unwrap_or_else(|_| dir.to_path_buf());
     // git reset -q unstages the entire index in both unborn/empty repos and repos with commits
-    if let Err(e) = run_git_cmd(dir, &["reset", "-q"]) {
-        if let Err(e2) = run_git_cmd(dir, &["restore", "--staged", "."]) {
-            run_git_cmd(dir, &["rm", "--cached", "-r", "."])
+    if let Err(e) = run_git_cmd(&root, &["reset", "-q"]) {
+        if let Err(e2) = run_git_cmd(&root, &["restore", "--staged", "."]) {
+            run_git_cmd(&root, &["rm", "--cached", "-r", "."])
                 .with_context(|| format!("Failed to unstage all: {} / {}", e, e2))?;
         }
     }
@@ -426,6 +446,39 @@ pub fn push_set_upstream(dir: &Path, remote: &str, branch: &str) -> Result<Strin
     run_git_cmd(dir, &["push", "-u", remote, branch])
 }
 
+pub fn read_gitignore(dir: &Path) -> Result<String> {
+    let root = get_repo_root(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let path = root.join(".gitignore");
+    if path.exists() {
+        std::fs::read_to_string(path).map_err(|e| anyhow!("Failed to read .gitignore: {}", e))
+    } else {
+        Ok(String::new())
+    }
+}
+
+pub fn save_gitignore(dir: &Path, content: &str) -> Result<()> {
+    let root = get_repo_root(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let path = root.join(".gitignore");
+    std::fs::write(path, content).map_err(|e| anyhow!("Failed to save .gitignore: {}", e))
+}
+
+#[allow(dead_code)]
+pub fn append_to_gitignore(dir: &Path, pattern: &str) -> Result<()> {
+    let root = get_repo_root(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let path = root.join(".gitignore");
+    let mut current = if path.exists() {
+        std::fs::read_to_string(&path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    if !current.ends_with('\n') && !current.is_empty() {
+        current.push('\n');
+    }
+    current.push_str(pattern.trim());
+    current.push('\n');
+    std::fs::write(path, current).map_err(|e| anyhow!("Failed to append to .gitignore: {}", e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,6 +514,74 @@ mod tests {
         unstage_all(&temp_dir).unwrap();
         let status = get_status(&temp_dir).unwrap();
         assert_eq!(status.staged.len(), 0, "Staged should be empty after unstage_all");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_stage_file_with_spaces_from_subdirectory() {
+        let temp_dir = std::env::temp_dir().join(format!("git_test_spaces_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        init_repo(&temp_dir).unwrap();
+
+        // Create file with space in name
+        let file_path = temp_dir.join("Text Document.txt");
+        std::fs::write(&file_path, "hello world").unwrap();
+
+        // Create a subdirectory inside repo
+        let sub_dir = temp_dir.join("subfolder").join("nested");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        // Staging from sub_dir should resolve to repo root and stage "Text Document.txt" without pathspec errors!
+        let status = get_status(&sub_dir).unwrap();
+        assert_eq!(status.untracked.len(), 1);
+        assert_eq!(status.untracked[0].path, "Text Document.txt");
+
+        stage_files(&sub_dir, &[status.untracked[0].path.clone()]).expect("Should stage file with spaces even from subdirectory");
+
+        let status = get_status(&sub_dir).unwrap();
+        assert_eq!(status.staged.len(), 1);
+        assert_eq!(status.staged[0].path, "Text Document.txt");
+
+        unstage_files(&sub_dir, &[status.staged[0].path.clone()]).expect("Should unstage file with spaces even from subdirectory");
+
+        let status = get_status(&sub_dir).unwrap();
+        assert_eq!(status.staged.len(), 0);
+        assert_eq!(status.untracked.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_gitignore_read_save_append() {
+        let temp_dir = std::env::temp_dir().join(format!("git_test_ignore_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        init_repo(&temp_dir).unwrap();
+
+        // Reading non-existent .gitignore should return empty string
+        let content = read_gitignore(&temp_dir).unwrap();
+        assert_eq!(content, "");
+
+        // Save content
+        save_gitignore(&temp_dir, "*.log\ntarget/\n").unwrap();
+        let content = read_gitignore(&temp_dir).unwrap();
+        assert_eq!(content, "*.log\ntarget/\n");
+
+        // Append pattern
+        append_to_gitignore(&temp_dir, ".env").unwrap();
+        let content = read_gitignore(&temp_dir).unwrap();
+        assert_eq!(content, "*.log\ntarget/\n.env\n");
+
+        // Calling from subdirectory should still edit repo root's .gitignore
+        let sub = temp_dir.join("a").join("b");
+        std::fs::create_dir_all(&sub).unwrap();
+        append_to_gitignore(&sub, "build/").unwrap();
+        let content = read_gitignore(&sub).unwrap();
+        assert!(content.contains("build/\n"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

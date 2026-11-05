@@ -109,6 +109,10 @@ pub struct RustyGitApp {
     remote_fetch_after: bool,
     remote_push_upstream: bool,
 
+    show_gitignore_modal: bool,
+    gitignore_content: String,
+    gitignore_new_pattern: String,
+
     show_discard_dialog: Option<(String, bool)>,
     show_delete_branch_dialog: Option<String>,
 }
@@ -117,15 +121,19 @@ impl RustyGitApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let (tx, rx) = channel();
 
-        // Default to current directory
+        // Default to repository root of current directory
         let current_dir = std::env::current_dir().ok();
-        let is_repo = current_dir
+        let actual_repo = current_dir
+            .as_ref()
+            .and_then(|p| git::get_repo_root(p).ok())
+            .or_else(|| current_dir.clone());
+        let is_repo = actual_repo
             .as_ref()
             .map(|p| git::is_git_repository(p))
             .unwrap_or(false);
 
         let mut app = Self {
-            repo_path: current_dir,
+            repo_path: actual_repo,
             is_git_repo: is_repo,
             current_branch: String::new(),
             branches: Vec::new(),
@@ -160,6 +168,9 @@ impl RustyGitApp {
             remote_url_input: String::new(),
             remote_fetch_after: true,
             remote_push_upstream: true,
+            show_gitignore_modal: false,
+            gitignore_content: String::new(),
+            gitignore_new_pattern: String::new(),
             show_discard_dialog: None,
             show_delete_branch_dialog: None,
         };
@@ -189,6 +200,22 @@ impl RustyGitApp {
 
     fn notify_error(&mut self, title: impl Into<String>, msg: impl Into<String>) {
         self.notify_alert(title, msg, true);
+    }
+
+    fn open_gitignore_modal(&mut self) {
+        if let Some(repo) = &self.repo_path {
+            match git::read_gitignore(repo) {
+                Ok(content) => self.gitignore_content = content,
+                Err(_) => self.gitignore_content = String::new(),
+            }
+            self.gitignore_new_pattern.clear();
+            self.show_gitignore_modal = true;
+        }
+    }
+
+    fn open_gitignore_modal_with_pattern(&mut self, pattern: &str) {
+        self.open_gitignore_modal();
+        self.gitignore_new_pattern = pattern.to_string();
     }
 
     pub fn set_repo(&mut self, path: PathBuf) {
@@ -598,6 +625,12 @@ impl RustyGitApp {
                     }
                 }
 
+                if widgets::text_button(ui, Some(icons::Icon::File), ".gitignore", Btn::Soft, enabled)
+                    .clicked()
+                {
+                    self.open_gitignore_modal();
+                }
+
                 // Current branch chip: opens the Branches view (matching CTRL_H height).
                 if self.is_git_repo && !self.current_branch.is_empty() {
                     let name = self.current_branch.clone();
@@ -862,6 +895,7 @@ impl RustyGitApp {
         let mut unstaged_to_stage: Option<String> = None;
         let mut unstaged_to_discard: Option<(String, bool)> = None;
         let mut unstaged_to_load: Option<(String, bool, bool)> = None;
+        let mut untracked_to_ignore: Option<String> = None;
 
         let avail_h = ui.available_height();
         let composer_h = metrics::COMPOSER_H;
@@ -1045,6 +1079,11 @@ impl RustyGitApp {
                                 hover: "Stage file",
                             },
                             RowBtn {
+                                icon: icons::Icon::File,
+                                action: RowAction::Ignore,
+                                hover: "Add to .gitignore",
+                            },
+                            RowBtn {
                                 icon: icons::Icon::X,
                                 action: RowAction::Discard,
                                 hover: "Delete untracked file",
@@ -1053,6 +1092,9 @@ impl RustyGitApp {
                     );
                     match action {
                         Some(RowAction::Stage) => unstaged_to_stage = Some(file.path.clone()),
+                        Some(RowAction::Ignore) => {
+                            untracked_to_ignore = Some(file.path.clone());
+                        }
                         Some(RowAction::Discard) => {
                             unstaged_to_discard = Some((file.path.clone(), true));
                         }
@@ -1095,6 +1137,9 @@ impl RustyGitApp {
         }
         if let Some(d) = unstaged_to_discard {
             self.show_discard_dialog = Some(d);
+        }
+        if let Some(p) = untracked_to_ignore {
+            self.open_gitignore_modal_with_pattern(&p);
         }
         if let Some(p) = staged_to_load {
             self.load_file_diff(p, true, false);
@@ -1361,6 +1406,7 @@ impl RustyGitApp {
             MainTab::Changes => {
                 if let Some(sel) = &self.selected_file {
                     let mut stage_toggle = None;
+                    let mut ignore_pattern_to_open = None;
                     ui.horizontal(|ui| {
                         // 1. Right-side diff statistics first
                         if let Some(diff) = &self.current_diff {
@@ -1403,6 +1449,11 @@ impl RustyGitApp {
                             if widgets::text_button(ui, Some(icons::Icon::Plus), "Stage", Btn::Soft, true).clicked() {
                                 stage_toggle = Some((sel_path.clone(), true));
                             }
+                            if sel.is_untracked {
+                                if widgets::text_button(ui, Some(icons::Icon::File), "Ignore...", Btn::Quiet, true).clicked() {
+                                    ignore_pattern_to_open = Some(sel_path.clone());
+                                }
+                            }
                         }
 
                         ui.add(
@@ -1440,6 +1491,9 @@ impl RustyGitApp {
                             }
                             self.trigger_refresh();
                         }
+                    }
+                    if let Some(p) = ignore_pattern_to_open {
+                        self.open_gitignore_modal_with_pattern(&p);
                     }
                     ui.add_space(metrics::SP_2XS);
                     ui.separator();
@@ -2060,6 +2114,151 @@ impl RustyGitApp {
                 });
             }
         }
+
+        // Modal: .gitignore Configuration
+        if self.show_gitignore_modal {
+            let mut close_modal = false;
+            let mut do_save = false;
+
+            egui::Window::new(egui::WidgetText::from(".gitignore Configuration"))
+                .collapsible(false)
+                .resizable(true)
+                .default_size(Vec2::new(540.0, 480.0))
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .frame(window_frame)
+                .show(ctx, |ui| {
+                    ui.label(
+                        RichText::new("Configure patterns and files to ignore in Git:")
+                            .size(metrics::TEXT_BODY)
+                            .color(tokens::TEXT),
+                    );
+                    ui.add_space(metrics::SP_XS);
+
+                    if let Some(r) = &self.repo_path {
+                        ui.label(
+                            RichText::new(format!("Location: {}/.gitignore", r.display()))
+                                .size(metrics::TEXT_SMALL)
+                                .color(tokens::TEXT_MUTED)
+                                .monospace(),
+                        );
+                    }
+                    ui.add_space(metrics::SP_SM);
+
+                    // Quick Add Pattern
+                    ui.label(
+                        RichText::new("Quick Add Pattern:")
+                            .strong()
+                            .size(metrics::TEXT_SMALL)
+                            .color(tokens::TEXT_MUTED),
+                    );
+                    ui.horizontal(|ui| {
+                        let text_resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.gitignore_new_pattern)
+                                .desired_width(340.0)
+                                .font(egui::TextStyle::Monospace)
+                                .hint_text("e.g. *.log, /target, .env, *.tmp"),
+                        );
+                        let can_add = !self.gitignore_new_pattern.trim().is_empty();
+                        let enter_pressed = text_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if widgets::text_button(ui, Some(icons::Icon::Plus), "Add Pattern", Btn::Soft, can_add).clicked() || (enter_pressed && can_add) {
+                            let pat = self.gitignore_new_pattern.trim().to_string();
+                            if !self.gitignore_content.ends_with('\n') && !self.gitignore_content.is_empty() {
+                                self.gitignore_content.push('\n');
+                            }
+                            self.gitignore_content.push_str(&pat);
+                            self.gitignore_content.push('\n');
+                            self.gitignore_new_pattern.clear();
+                        }
+                    });
+                    ui.add_space(metrics::SP_SM);
+
+                    // Presets
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Quick Presets:").size(metrics::TEXT_SMALL).color(tokens::TEXT_MUTED));
+                        if widgets::text_button(ui, None, "+ Rust", Btn::Quiet, true).clicked() {
+                            if !self.gitignore_content.ends_with('\n') && !self.gitignore_content.is_empty() {
+                                self.gitignore_content.push('\n');
+                            }
+                            self.gitignore_content.push_str("# Rust\n/target/\n**/*.rs.bk\nCargo.lock\n");
+                        }
+                        if widgets::text_button(ui, None, "+ Node.js", Btn::Quiet, true).clicked() {
+                            if !self.gitignore_content.ends_with('\n') && !self.gitignore_content.is_empty() {
+                                self.gitignore_content.push('\n');
+                            }
+                            self.gitignore_content.push_str("# Node\nnode_modules/\nnpm-debug.log*\nyarn-debug.log*\nyarn-error.log*\n.env\n/dist/\n");
+                        }
+                        if widgets::text_button(ui, None, "+ Python", Btn::Quiet, true).clicked() {
+                            if !self.gitignore_content.ends_with('\n') && !self.gitignore_content.is_empty() {
+                                self.gitignore_content.push('\n');
+                            }
+                            self.gitignore_content.push_str("# Python\n__pycache__/\n*.py[cod]\n*$py.class\nvenv/\n.env\n");
+                        }
+                        if widgets::text_button(ui, None, "+ OS & IDEs", Btn::Quiet, true).clicked() {
+                            if !self.gitignore_content.ends_with('\n') && !self.gitignore_content.is_empty() {
+                                self.gitignore_content.push('\n');
+                            }
+                            self.gitignore_content.push_str("# OS & IDEs\n.DS_Store\nThumbs.db\n.vscode/\n.idea/\n*.swp\n");
+                        }
+                    });
+                    ui.add_space(metrics::SP_SM);
+
+                    ui.label(
+                        RichText::new(".gitignore Rules (editable):")
+                            .strong()
+                            .size(metrics::TEXT_SMALL)
+                            .color(tokens::TEXT_MUTED),
+                    );
+
+                    egui::ScrollArea::vertical()
+                        .max_height(250.0)
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.gitignore_content)
+                                    .desired_width(ui.available_width())
+                                    .desired_rows(12)
+                                    .font(egui::TextStyle::Monospace)
+                                    .code_editor(),
+                            );
+                        });
+
+                    ui.add_space(metrics::SP_MD);
+                    ui.horizontal(|ui| {
+                        if widgets::text_button(
+                            ui,
+                            Some(icons::Icon::Check),
+                            "Save .gitignore",
+                            Btn::Primary,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            do_save = true;
+                        }
+                        if widgets::text_button(ui, None, "Cancel", Btn::Soft, true).clicked() {
+                            close_modal = true;
+                        }
+                    });
+                });
+
+            if close_modal {
+                self.show_gitignore_modal = false;
+            }
+
+            if do_save {
+                self.show_gitignore_modal = false;
+                if let Some(repo) = self.repo_path.clone() {
+                    match git::save_gitignore(&repo, &self.gitignore_content) {
+                        Ok(_) => {
+                            self.notify_success("Gitignore", "Saved .gitignore successfully");
+                            self.trigger_refresh();
+                        }
+                        Err(e) => {
+                            self.notify_error("Gitignore", format!("Failed to save .gitignore: {}", e));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn render_toast_alert(&mut self, ctx: &egui::Context) {
@@ -2191,6 +2390,7 @@ enum RowAction {
     Stage,
     Unstage,
     Discard,
+    Ignore,
 }
 
 struct RowBtn {
