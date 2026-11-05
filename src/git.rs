@@ -5,7 +5,7 @@ use std::process::Command;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-use crate::models::{Branch, CommitInfo, FileStatus, GitStatus};
+use crate::models::{Branch, CommitInfo, FileStatus, GitStatus, RemoteInfo};
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -63,13 +63,18 @@ pub fn get_current_branch(dir: &Path) -> Result<String> {
     let out = run_git_cmd(dir, &["branch", "--show-current"])?;
     let branch = out.trim();
     if branch.is_empty() {
-        // Might be detached HEAD
-        let head_out = run_git_cmd(dir, &["rev-parse", "--short", "HEAD"])?;
-        let head = head_out.trim();
-        if head.is_empty() {
-            Ok("HEAD (empty)".to_string())
-        } else {
-            Ok(format!("HEAD ({})", head))
+        // Might be detached HEAD or empty unborn branch
+        let head_out = run_git_cmd(dir, &["rev-parse", "--short", "HEAD"]);
+        match head_out {
+            Ok(h) => {
+                let head = h.trim();
+                if head.is_empty() {
+                    Ok("main (unborn)".to_string())
+                } else {
+                    Ok(format!("HEAD ({})", head))
+                }
+            }
+            Err(_) => Ok("main (unborn)".to_string()),
         }
     } else {
         Ok(branch.to_string())
@@ -209,30 +214,46 @@ pub fn unstage_files(dir: &Path, files: &[String]) -> Result<()> {
     if files.is_empty() {
         return Ok(());
     }
-    let mut args = vec!["restore", "--staged", "--"];
+    // Handle renamed files ("old -> new") and clean paths
+    let mut clean_files = Vec::new();
     for f in files {
-        args.push(f.as_str());
-    }
-    if let Err(e) = run_git_cmd(dir, &args) {
-        let mut reset_args = vec!["reset", "HEAD", "--"];
-        for f in files {
-            reset_args.push(f.as_str());
+        if let Some((old_p, new_p)) = f.split_once(" -> ") {
+            clean_files.push(old_p.trim().trim_matches('"').to_string());
+            clean_files.push(new_p.trim().trim_matches('"').to_string());
+        } else {
+            clean_files.push(f.trim().trim_matches('"').to_string());
         }
-        if let Err(_e2) = run_git_cmd(dir, &reset_args) {
+    }
+
+    // git reset -q -- <files> unstages files in all repository states (including unborn/empty branch)
+    let mut reset_args = vec!["reset", "-q", "--"];
+    for f in &clean_files {
+        reset_args.push(f.as_str());
+    }
+
+    if let Err(e) = run_git_cmd(dir, &reset_args) {
+        let mut restore_args = vec!["restore", "--staged", "--"];
+        for f in &clean_files {
+            restore_args.push(f.as_str());
+        }
+        if let Err(e2) = run_git_cmd(dir, &restore_args) {
             let mut rm_args = vec!["rm", "--cached", "-r", "--"];
-            for f in files {
+            for f in &clean_files {
                 rm_args.push(f.as_str());
             }
-            run_git_cmd(dir, &rm_args).context(format!("Failed to unstage files: {}", e))?;
+            run_git_cmd(dir, &rm_args)
+                .with_context(|| format!("Failed to unstage files: {} / {}", e, e2))?;
         }
     }
     Ok(())
 }
 
 pub fn unstage_all(dir: &Path) -> Result<()> {
-    if run_git_cmd(dir, &["restore", "--staged", "."]).is_err() {
-        if run_git_cmd(dir, &["reset", "HEAD", "."]).is_err() {
-            let _ = run_git_cmd(dir, &["rm", "--cached", "-r", "."]);
+    // git reset -q unstages the entire index in both unborn/empty repos and repos with commits
+    if let Err(e) = run_git_cmd(dir, &["reset", "-q"]) {
+        if let Err(e2) = run_git_cmd(dir, &["restore", "--staged", "."]) {
+            run_git_cmd(dir, &["rm", "--cached", "-r", "."])
+                .with_context(|| format!("Failed to unstage all: {} / {}", e, e2))?;
         }
     }
     Ok(())
@@ -364,4 +385,83 @@ pub fn init_repo(dir: &Path) -> Result<()> {
 pub fn read_file_content(dir: &Path, rel_path: &str) -> Result<String> {
     let full_path = dir.join(rel_path);
     std::fs::read_to_string(full_path).map_err(|e| anyhow!("Failed to read file: {}", e))
+}
+
+pub fn list_remotes(dir: &Path) -> Result<Vec<RemoteInfo>> {
+    let out = match run_git_cmd(dir, &["remote", "-v"]) {
+        Ok(o) => o,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut remotes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in out.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let name = parts[0].to_string();
+            let url = parts[1].to_string();
+            if seen.insert(name.clone()) {
+                remotes.push(RemoteInfo { name, url });
+            }
+        }
+    }
+    Ok(remotes)
+}
+
+pub fn add_or_set_remote(dir: &Path, name: &str, url: &str) -> Result<()> {
+    let existing = list_remotes(dir).unwrap_or_default();
+    if existing.iter().any(|r| r.name == name) {
+        run_git_cmd(dir, &["remote", "set-url", name, url])?;
+    } else {
+        run_git_cmd(dir, &["remote", "add", name, url])?;
+    }
+    Ok(())
+}
+
+pub fn remove_remote(dir: &Path, name: &str) -> Result<()> {
+    run_git_cmd(dir, &["remote", "remove", name])?;
+    Ok(())
+}
+
+pub fn push_set_upstream(dir: &Path, remote: &str, branch: &str) -> Result<String> {
+    run_git_cmd(dir, &["push", "-u", remote, branch])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_unstage_in_empty_and_normal_repo() {
+        let temp_dir = std::env::temp_dir().join(format!("git_test_unstage_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. Unborn / empty repo test
+        init_repo(&temp_dir).unwrap();
+        let file_path = temp_dir.join("test.txt");
+        std::fs::write(&file_path, "hello").unwrap();
+
+        // Stage file
+        stage_files(&temp_dir, &["test.txt".to_string()]).unwrap();
+        let status = get_status(&temp_dir).unwrap();
+        assert_eq!(status.staged.len(), 1, "Should have 1 staged file in unborn repo");
+        assert_eq!(status.staged[0].path, "test.txt");
+
+        // Unstage single file
+        unstage_files(&temp_dir, &["test.txt".to_string()]).unwrap();
+        let status = get_status(&temp_dir).unwrap();
+        assert_eq!(status.staged.len(), 0, "Staged should be empty after unstage_files");
+        assert_eq!(status.untracked.len(), 1, "File should be untracked");
+
+        // Stage file again and test unstage_all
+        stage_files(&temp_dir, &["test.txt".to_string()]).unwrap();
+        let status = get_status(&temp_dir).unwrap();
+        assert_eq!(status.staged.len(), 1);
+
+        unstage_all(&temp_dir).unwrap();
+        let status = get_status(&temp_dir).unwrap();
+        assert_eq!(status.staged.len(), 0, "Staged should be empty after unstage_all");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

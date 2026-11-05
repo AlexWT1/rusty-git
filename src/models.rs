@@ -7,6 +7,12 @@ pub struct Branch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteInfo {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileStatus {
     pub path: String,
     pub index_status: char,
@@ -14,6 +20,7 @@ pub struct FileStatus {
     pub is_staged: bool,
 }
 
+#[allow(dead_code)]
 impl FileStatus {
     pub fn display_status(&self) -> &str {
         if self.is_staged {
@@ -89,4 +96,5 @@ pub struct ParsedDiff {
     pub lines: Vec<DiffLine>,
     pub additions: usize,
     pub deletions: usize,
+    pub max_line_len: usize,
 }

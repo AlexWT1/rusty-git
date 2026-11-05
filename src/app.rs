@@ -5,7 +5,7 @@ use std::thread;
 
 use crate::diff_parser::parse_git_diff;
 use crate::git;
-use crate::models::{Branch, CommitInfo, GitStatus, ParsedDiff};
+use crate::models::{Branch, CommitInfo, GitStatus, ParsedDiff, RemoteInfo};
 use crate::theme::widgets::Btn;
 use crate::theme::{icons, metrics, tokens, widgets};
 
@@ -28,6 +28,7 @@ enum AsyncMessage {
     RefreshDone {
         current_branch: String,
         branches: Vec<Branch>,
+        remotes: Vec<RemoteInfo>,
         status: GitStatus,
         commits: Vec<CommitInfo>,
     },
@@ -50,12 +51,21 @@ enum AsyncMessage {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct ToastAlert {
+    pub title: String,
+    pub message: String,
+    pub is_error: bool,
+    pub created_at: std::time::Instant,
+}
+
 pub struct RustyGitApp {
     repo_path: Option<PathBuf>,
     is_git_repo: bool,
 
     current_branch: String,
     branches: Vec<Branch>,
+    remotes: Vec<RemoteInfo>,
     git_status: GitStatus,
     commits: Vec<CommitInfo>,
 
@@ -69,6 +79,9 @@ pub struct RustyGitApp {
 
     file_view_path: Option<String>,
     file_view_content: Option<String>,
+    file_view_lines: Vec<String>,
+    file_view_max_len: usize,
+    dir_cache: std::collections::HashMap<PathBuf, (Vec<(String, PathBuf)>, Vec<(String, PathBuf)>)>,
 
     commit_message: String,
     commit_amend: bool,
@@ -81,13 +94,20 @@ pub struct RustyGitApp {
     is_busy: bool,
     busy_message: String,
 
-    // Notification toast
+    // Notification toast & alert
     notification: Option<(String, bool, std::time::Instant)>,
+    toast: Option<ToastAlert>,
 
     // Modals & confirmation dialogs
     show_new_branch_modal: bool,
     new_branch_name: String,
     new_branch_checkout: bool,
+
+    show_connect_remote_modal: bool,
+    remote_name_input: String,
+    remote_url_input: String,
+    remote_fetch_after: bool,
+    remote_push_upstream: bool,
 
     show_discard_dialog: Option<(String, bool)>,
     show_delete_branch_dialog: Option<String>,
@@ -109,6 +129,7 @@ impl RustyGitApp {
             is_git_repo: is_repo,
             current_branch: String::new(),
             branches: Vec::new(),
+            remotes: Vec::new(),
             git_status: GitStatus::default(),
             commits: Vec::new(),
             selected_tab: MainTab::Changes,
@@ -119,6 +140,9 @@ impl RustyGitApp {
             selected_commit_diff: None,
             file_view_path: None,
             file_view_content: None,
+            file_view_lines: Vec::new(),
+            file_view_max_len: 0,
+            dir_cache: std::collections::HashMap::new(),
             commit_message: String::new(),
             commit_amend: false,
             search_query: String::new(),
@@ -127,9 +151,15 @@ impl RustyGitApp {
             is_busy: false,
             busy_message: String::new(),
             notification: None,
+            toast: None,
             show_new_branch_modal: false,
             new_branch_name: String::new(),
             new_branch_checkout: true,
+            show_connect_remote_modal: false,
+            remote_name_input: "origin".to_string(),
+            remote_url_input: String::new(),
+            remote_fetch_after: true,
+            remote_push_upstream: true,
             show_discard_dialog: None,
             show_delete_branch_dialog: None,
         };
@@ -141,12 +171,24 @@ impl RustyGitApp {
         app
     }
 
-    fn notify_success(&mut self, msg: impl Into<String>) {
-        self.notification = Some((msg.into(), false, std::time::Instant::now()));
+    fn notify_alert(&mut self, title: impl Into<String>, msg: impl Into<String>, is_error: bool) {
+        let t = title.into();
+        let m = msg.into();
+        self.notification = Some((format!("{}: {}", t, m), is_error, std::time::Instant::now()));
+        self.toast = Some(ToastAlert {
+            title: t,
+            message: m,
+            is_error,
+            created_at: std::time::Instant::now(),
+        });
     }
 
-    fn notify_error(&mut self, msg: impl Into<String>) {
-        self.notification = Some((msg.into(), true, std::time::Instant::now()));
+    fn notify_success(&mut self, title: impl Into<String>, msg: impl Into<String>) {
+        self.notify_alert(title, msg, false);
+    }
+
+    fn notify_error(&mut self, title: impl Into<String>, msg: impl Into<String>) {
+        self.notify_alert(title, msg, true);
     }
 
     pub fn set_repo(&mut self, path: PathBuf) {
@@ -159,12 +201,13 @@ impl RustyGitApp {
         self.selected_commit = None;
         self.selected_commit_files.clear();
         self.selected_commit_diff = None;
+        self.dir_cache.clear();
 
         if is_repo {
             self.trigger_refresh();
-            self.notify_success("Repository loaded");
+            self.notify_success("Repository", "Repository loaded successfully");
         } else {
-            self.notify_error("Directory is not a Git repository");
+            self.notify_error("Repository", "Directory is not a Git repository");
         }
     }
 
@@ -179,12 +222,14 @@ impl RustyGitApp {
         thread::spawn(move || {
             let current_branch = git::get_current_branch(&repo).unwrap_or_else(|_| "HEAD".into());
             let branches = git::list_branches(&repo).unwrap_or_default();
+            let remotes = git::list_remotes(&repo).unwrap_or_default();
             let status = git::get_status(&repo).unwrap_or_default();
             let commits = git::get_log(&repo, 50).unwrap_or_default();
 
             let _ = tx.send(AsyncMessage::RefreshDone {
                 current_branch,
                 branches,
+                remotes,
                 status,
                 commits,
             });
@@ -275,13 +320,16 @@ impl RustyGitApp {
                 AsyncMessage::RefreshDone {
                     current_branch,
                     branches,
+                    remotes,
                     status,
                     commits,
                 } => {
                     self.current_branch = current_branch;
                     self.branches = branches;
+                    self.remotes = remotes;
                     self.git_status = status;
                     self.commits = commits;
+                    self.dir_cache.clear();
                     self.is_busy = false;
 
                     // If a file was selected, reload its diff
@@ -308,8 +356,15 @@ impl RustyGitApp {
                     ctx.request_repaint();
                 }
                 AsyncMessage::FileContentLoaded { path, content } => {
+                    let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+                    let mut max_len = 0;
+                    for l in &lines {
+                        max_len = max_len.max(l.len());
+                    }
                     self.file_view_path = Some(path);
                     self.file_view_content = Some(content);
+                    self.file_view_lines = lines;
+                    self.file_view_max_len = max_len;
                     ctx.request_repaint();
                 }
                 AsyncMessage::OperationFinished {
@@ -322,14 +377,15 @@ impl RustyGitApp {
                             let text = if msg.trim().is_empty() {
                                 format!("{} completed successfully", action_name)
                             } else {
-                                format!("{}: {}", action_name, msg.trim())
+                                msg.trim().to_string()
                             };
-                            self.notify_success(text);
+                            self.notify_success(format!("{} Successful", action_name), text);
                         }
                         Err(err) => {
-                            self.notify_error(format!("{} error: {}", action_name, err));
+                            self.notify_error(format!("{} Failed", action_name), err);
                         }
                     }
+                    self.dir_cache.clear();
                     self.trigger_refresh();
                     ctx.request_repaint();
                 }
@@ -420,6 +476,9 @@ impl eframe::App for RustyGitApp {
 
         // Render Modals / Popups if open
         self.render_modals(&ctx);
+
+        // Render floating Toast Alert if active
+        self.render_toast_alert(&ctx);
     }
 }
 
@@ -528,6 +587,15 @@ impl RustyGitApp {
                     .clicked()
                 {
                     self.run_async_op("Fetch", "Fetching remote refs...", |dir| git::fetch(dir));
+                }
+
+                if widgets::text_button(ui, Some(icons::Icon::Link), "Remote", Btn::Soft, enabled)
+                    .clicked()
+                {
+                    self.show_connect_remote_modal = true;
+                    if self.remote_name_input.trim().is_empty() {
+                        self.remote_name_input = "origin".to_string();
+                    }
                 }
 
                 // Current branch chip: opens the Branches view (matching CTRL_H height).
@@ -685,9 +753,9 @@ impl RustyGitApp {
                 {
                     if let Some(dir) = self.repo_path.clone() {
                         if let Err(e) = git::init_repo(&dir) {
-                            self.notify_error(format!("Failed to init: {}", e));
+                            self.notify_error("Init", format!("Failed to init: {}", e));
                         } else {
-                            self.notify_success("Initialized Git repository!");
+                            self.notify_success("Init", "Initialized Git repository!");
                             self.set_repo(dir);
                         }
                     }
@@ -815,6 +883,7 @@ impl RustyGitApp {
                             .color(tokens::TEXT_MUTED),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(8.0);
                         if widgets::text_button(
                             ui,
                             Some(icons::Icon::Minus),
@@ -826,9 +895,9 @@ impl RustyGitApp {
                         {
                             if let Some(r) = &repo {
                                 if let Err(e) = git::unstage_all(r) {
-                                    self.notify_error(format!("Failed to unstage all: {}", e));
+                                    self.notify_error("Unstage All", format!("Failed to unstage all: {}", e));
                                 } else {
-                                    self.notify_success("Unstaged all changes");
+                                    self.notify_success("Unstage All", "Unstaged all changes");
                                     if let Some(sel) = &mut self.selected_file {
                                         if sel.is_staged {
                                             sel.is_staged = false;
@@ -890,6 +959,7 @@ impl RustyGitApp {
                             .color(tokens::TEXT_MUTED),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(8.0);
                         if widgets::text_button(
                             ui,
                             Some(icons::Icon::Plus),
@@ -901,9 +971,9 @@ impl RustyGitApp {
                         {
                             if let Some(r) = &repo {
                                 if let Err(e) = git::stage_all(r) {
-                                    self.notify_error(format!("Failed to stage all: {}", e));
+                                    self.notify_error("Stage All", format!("Failed to stage all: {}", e));
                                 } else {
-                                    self.notify_success("Staged all changes");
+                                    self.notify_success("Stage All", "Staged all changes");
                                     if let Some(sel) = &mut self.selected_file {
                                         if !sel.is_staged {
                                             sel.is_staged = true;
@@ -1010,9 +1080,9 @@ impl RustyGitApp {
         if let Some(p) = unstaged_to_stage {
             if let Some(r) = &repo {
                 if let Err(e) = git::stage_files(r, &[p.clone()]) {
-                    self.notify_error(format!("Failed to stage {}: {}", p, e));
+                    self.notify_error("Stage File", format!("Failed to stage {}: {}", p, e));
                 } else {
-                    self.notify_success(format!("Staged {}", p));
+                    self.notify_success("Stage File", format!("Staged {}", p));
                     if let Some(sel) = &mut self.selected_file {
                         if sel.path == p && !sel.is_staged {
                             sel.is_staged = true;
@@ -1032,9 +1102,9 @@ impl RustyGitApp {
         if let Some(p) = staged_to_unstage {
             if let Some(r) = &repo {
                 if let Err(e) = git::unstage_files(r, &[p.clone()]) {
-                    self.notify_error(format!("Failed to unstage {}: {}", p, e));
+                    self.notify_error("Unstage File", format!("Failed to unstage {}: {}", p, e));
                 } else {
-                    self.notify_success(format!("Unstaged {}", p));
+                    self.notify_success("Unstage File", format!("Unstaged {}", p));
                     if let Some(sel) = &mut self.selected_file {
                         if sel.path == p && sel.is_staged {
                             sel.is_staged = false;
@@ -1174,6 +1244,18 @@ impl RustyGitApp {
                 .size(metrics::TEXT_SMALL)
                 .color(tokens::TEXT_MUTED),
         );
+        ui.label(
+            RichText::new(format!("Connected remotes: {}", self.remotes.len()))
+                .size(metrics::TEXT_SMALL)
+                .color(tokens::TEXT_MUTED),
+        );
+        ui.add_space(metrics::SP_SM);
+        if widgets::text_button(ui, Some(icons::Icon::Link), "Connect Remote", Btn::Soft, true).clicked() {
+            self.show_connect_remote_modal = true;
+            if self.remote_name_input.trim().is_empty() {
+                self.remote_name_input = "origin".to_string();
+            }
+        }
         ui.add_space(metrics::SP_XS);
         ui.label(
             RichText::new("Manage and switch branches in the central view.")
@@ -1255,7 +1337,7 @@ impl RustyGitApp {
         );
         ui.add_space(metrics::SP_2XS);
 
-        let Some(repo) = &self.repo_path else {
+        let Some(repo) = self.repo_path.clone() else {
             return;
         };
 
@@ -1266,7 +1348,7 @@ impl RustyGitApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
-                render_dir_tree(ui, repo, repo, &mut file_to_read);
+                render_dir_tree(ui, &repo, &repo, &mut self.dir_cache, &mut file_to_read);
             });
 
         if let Some(p) = file_to_read {
@@ -1278,6 +1360,7 @@ impl RustyGitApp {
         match self.selected_tab {
             MainTab::Changes => {
                 if let Some(sel) = &self.selected_file {
+                    let mut stage_toggle = None;
                     ui.horizontal(|ui| {
                         // 1. Right-side diff statistics first
                         if let Some(diff) = &self.current_diff {
@@ -1310,6 +1393,18 @@ impl RustyGitApp {
                         };
                         widgets::chip(ui, label, fg, bg, false);
 
+                        let is_staged = sel.is_staged;
+                        let sel_path = sel.path.clone();
+                        if is_staged {
+                            if widgets::text_button(ui, Some(icons::Icon::Minus), "Unstage", Btn::Soft, true).clicked() {
+                                stage_toggle = Some((sel_path.clone(), false));
+                            }
+                        } else {
+                            if widgets::text_button(ui, Some(icons::Icon::Plus), "Stage", Btn::Soft, true).clicked() {
+                                stage_toggle = Some((sel_path.clone(), true));
+                            }
+                        }
+
                         ui.add(
                             egui::Label::new(
                                 RichText::new(&sel.path)
@@ -1320,6 +1415,32 @@ impl RustyGitApp {
                             .truncate(),
                         );
                     });
+
+                    if let Some((p, to_stage)) = stage_toggle {
+                        if let Some(r) = self.repo_path.clone() {
+                            if to_stage {
+                                if let Err(e) = git::stage_files(&r, &[p.clone()]) {
+                                    self.notify_error("Stage File", format!("Failed to stage {}: {}", p, e));
+                                } else {
+                                    self.notify_success("Stage File", format!("Staged {}", p));
+                                    if let Some(s) = &mut self.selected_file {
+                                        s.is_staged = true;
+                                        s.is_untracked = false;
+                                    }
+                                }
+                            } else {
+                                if let Err(e) = git::unstage_files(&r, &[p.clone()]) {
+                                    self.notify_error("Unstage File", format!("Failed to unstage {}: {}", p, e));
+                                } else {
+                                    self.notify_success("Unstage File", format!("Unstaged {}", p));
+                                    if let Some(s) = &mut self.selected_file {
+                                        s.is_staged = false;
+                                    }
+                                }
+                            }
+                            self.trigger_refresh();
+                        }
+                    }
                     ui.add_space(metrics::SP_2XS);
                     ui.separator();
                     ui.add_space(metrics::SP_2XS);
@@ -1497,6 +1618,7 @@ impl RustyGitApp {
 
                 let mut branch_to_checkout = None;
                 let mut branch_to_delete = None;
+                let mut remote_to_remove = None;
 
                 egui::ScrollArea::vertical()
                     .id_salt("branches_scroll")
@@ -1552,7 +1674,64 @@ impl RustyGitApp {
                                 branch_to_delete = Some(name);
                             }
                         }
+
+                        ui.add_space(metrics::SP_MD);
+                        ui.horizontal(|ui| {
+                            let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(metrics::ICON_SIZE), egui::Sense::hover());
+                            icons::paint(ui.painter(), icons::glyph_in(icon_rect, metrics::ICON_SIZE - 2.0), icons::Icon::Link, tokens::ACCENT);
+                            ui.label(
+                                RichText::new("Connected Remotes")
+                                    .strong()
+                                    .size(metrics::TEXT_SMALL)
+                                    .color(tokens::TEXT_MUTED),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if widgets::text_button(ui, Some(icons::Icon::Plus), "Add Remote", Btn::Soft, true).clicked() {
+                                    self.show_connect_remote_modal = true;
+                                    if self.remote_name_input.trim().is_empty() {
+                                        self.remote_name_input = "origin".to_string();
+                                    }
+                                }
+                            });
+                        });
+
+                        if self.remotes.is_empty() {
+                            ui.label(
+                                RichText::new("No remotes configured. Click 'Add Remote' or 'Remote' in top bar to connect to GitHub, GitLab, etc.")
+                                    .weak()
+                                    .size(metrics::TEXT_SMALL)
+                                    .color(tokens::TEXT_FAINT),
+                            );
+                        } else {
+                            for r in &self.remotes {
+                                egui::Frame::NONE
+                                    .fill(tokens::SURFACE)
+                                    .corner_radius(tokens::RADIUS_WIDGET)
+                                    .stroke(egui::Stroke::new(1.0, tokens::HAIRLINE))
+                                    .inner_margin(egui::Margin::symmetric(metrics::SP_SM as i8, 6))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(metrics::ICON_SIZE), egui::Sense::hover());
+                                            icons::paint(ui.painter(), icons::glyph_in(icon_rect, metrics::ICON_SIZE - 2.0), icons::Icon::Link, tokens::ACCENT);
+                                            ui.label(RichText::new(&r.name).strong().color(tokens::TEXT));
+                                            ui.label(RichText::new(&r.url).monospace().size(metrics::TEXT_SMALL).color(tokens::TEXT_MUTED));
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                if widgets::text_button(ui, None, "Remove", Btn::Quiet, true).clicked() {
+                                                    remote_to_remove = Some(r.name.clone());
+                                                }
+                                            });
+                                        });
+                                    });
+                            }
+                        }
                     });
+
+                if let Some(r_name) = remote_to_remove {
+                    self.run_async_op("Remove Remote", "Removing remote...", move |dir| {
+                        git::remove_remote(dir, &r_name)?;
+                        Ok(format!("Removed remote '{}'", r_name))
+                    });
+                }
 
                 if let Some(b) = branch_to_checkout {
                     self.run_async_op("Checkout", "Checking out branch...", move |dir| {
@@ -1601,7 +1780,7 @@ impl RustyGitApp {
                         .corner_radius(tokens::RADIUS_WIDGET)
                         .inner_margin(egui::Margin::same(0))
                         .show(ui, |ui| {
-                            render_code_viewer(ui, content);
+                            render_code_viewer(ui, &self.file_view_lines, self.file_view_max_len);
                         });
                 } else {
                     empty_state(
@@ -1748,6 +1927,218 @@ impl RustyGitApp {
                     });
                 });
         }
+
+        // Modal: Connect Remote
+        if self.show_connect_remote_modal {
+            let mut close_modal = false;
+            let mut do_connect = false;
+            let mut remote_to_delete = None;
+
+            egui::Window::new(egui::WidgetText::from("Connect Remote Repository"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .frame(window_frame)
+                .show(ctx, |ui| {
+                    ui.set_width(420.0);
+                    ui.label(
+                        RichText::new("Link this local repository with a remote (GitHub, GitLab, etc.):")
+                            .size(metrics::TEXT_BODY)
+                            .color(tokens::TEXT),
+                    );
+                    ui.add_space(metrics::SP_SM);
+
+                    if !self.remotes.is_empty() {
+                        ui.label(
+                            RichText::new("Existing Remotes:")
+                                .strong()
+                                .size(metrics::TEXT_SMALL)
+                                .color(tokens::TEXT_MUTED),
+                        );
+                        for r in &self.remotes {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(&r.name).strong().color(tokens::ACCENT));
+                                ui.label(RichText::new(&r.url).size(metrics::TEXT_SMALL).color(tokens::TEXT_MUTED).monospace());
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if widgets::text_button(ui, None, "Delete", Btn::Quiet, true).clicked() {
+                                        remote_to_delete = Some(r.name.clone());
+                                    }
+                                });
+                            });
+                        }
+                        ui.add_space(metrics::SP_SM);
+                        ui.separator();
+                        ui.add_space(metrics::SP_SM);
+                    }
+
+                    ui.label(
+                        RichText::new("Remote Name:")
+                            .size(metrics::TEXT_SMALL)
+                            .color(tokens::TEXT_MUTED),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.remote_name_input)
+                            .desired_width(400.0)
+                            .font(egui::TextStyle::Monospace)
+                            .hint_text("origin"),
+                    );
+                    ui.add_space(metrics::SP_XS);
+
+                    ui.label(
+                        RichText::new("Remote URL (HTTPS or SSH):")
+                            .size(metrics::TEXT_SMALL)
+                            .color(tokens::TEXT_MUTED),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.remote_url_input)
+                            .desired_width(400.0)
+                            .font(egui::TextStyle::Monospace)
+                            .hint_text("https://github.com/user/repository.git"),
+                    );
+                    ui.add_space(metrics::SP_SM);
+
+                    ui.checkbox(&mut self.remote_fetch_after, "Fetch remote branches immediately");
+                    ui.checkbox(&mut self.remote_push_upstream, "Push and set current branch as upstream tracking");
+
+                    ui.add_space(metrics::SP_MD);
+                    ui.horizontal(|ui| {
+                        let can_connect = !self.remote_name_input.trim().is_empty()
+                            && !self.remote_url_input.trim().is_empty();
+
+                        if widgets::text_button(
+                            ui,
+                            Some(icons::Icon::Link),
+                            "Connect & Link",
+                            Btn::Primary,
+                            can_connect,
+                        )
+                        .clicked()
+                        {
+                            do_connect = true;
+                        }
+                        if widgets::text_button(ui, None, "Cancel", Btn::Soft, true).clicked() {
+                            close_modal = true;
+                        }
+                    });
+                });
+
+            if let Some(r_name) = remote_to_delete {
+                self.run_async_op("Remove Remote", "Removing remote...", move |dir| {
+                    git::remove_remote(dir, &r_name)?;
+                    Ok(format!("Removed remote '{}'", r_name))
+                });
+            }
+
+            if close_modal {
+                self.show_connect_remote_modal = false;
+            }
+
+            if do_connect {
+                self.show_connect_remote_modal = false;
+                let name = self.remote_name_input.trim().to_string();
+                let url = self.remote_url_input.trim().to_string();
+                let fetch = self.remote_fetch_after;
+                let push_up = self.remote_push_upstream;
+                let cur_branch = self.current_branch.clone();
+
+                self.run_async_op("Connect Remote", "Connecting remote repository...", move |dir| {
+                    git::add_or_set_remote(dir, &name, &url)?;
+                    let mut msgs = vec![format!("Connected remote '{}' ({})", name, url)];
+                    if fetch {
+                        match git::fetch(dir) {
+                            Ok(_) => msgs.push("Fetched remote branches".into()),
+                            Err(e) => msgs.push(format!("Fetch note: {}", e)),
+                        }
+                    }
+                    if push_up && !cur_branch.is_empty() && !cur_branch.contains("(unborn)") {
+                        match git::push_set_upstream(dir, &name, &cur_branch) {
+                            Ok(_) => msgs.push(format!("Pushed & tracking '{}/{}'", name, cur_branch)),
+                            Err(e) => msgs.push(format!("Upstream push note: {}", e)),
+                        }
+                    }
+                    Ok(msgs.join(". "))
+                });
+            }
+        }
+    }
+
+    fn render_toast_alert(&mut self, ctx: &egui::Context) {
+        if let Some(toast) = &self.toast {
+            if toast.created_at.elapsed().as_secs_f32() > 4.5 {
+                self.toast = None;
+                return;
+            }
+            // Request repaint so it will dismiss after 4.5s even if idle
+            ctx.request_repaint();
+
+            let is_error = toast.is_error;
+            let (border_color, icon, icon_bg) = if is_error {
+                (tokens::DANGER, icons::Icon::Warn, tokens::DEL_BG)
+            } else {
+                (tokens::SUCCESS, icons::Icon::Check, tokens::ADD_BG)
+            };
+
+            let mut dismiss = false;
+            egui::Area::new(egui::Id::NULL.with("toast_alert_floating_area"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-20.0, 56.0))
+                .show(ctx, |ui| {
+                    egui::Frame::NONE
+                        .fill(tokens::SURFACE_HI)
+                        .stroke(egui::Stroke::new(1.5, border_color))
+                        .corner_radius(tokens::RADIUS_WINDOW)
+                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .show(ui, |ui| {
+                            ui.set_max_width(360.0);
+                            ui.horizontal(|ui| {
+                                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(24.0), egui::Sense::hover());
+                                ui.painter().rect_filled(icon_rect, 12.0, icon_bg);
+                                icons::paint(
+                                    ui.painter(),
+                                    icons::glyph_in(icon_rect, 14.0),
+                                    icon,
+                                    if is_error { tokens::DANGER_TEXT } else { tokens::SUCCESS },
+                                );
+
+                                ui.add_space(metrics::SP_2XS);
+                                ui.vertical(|ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(&toast.title)
+                                                .strong()
+                                                .size(metrics::TEXT_BODY)
+                                                .color(tokens::TEXT),
+                                        );
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let close_resp = ui.add(
+                                                egui::Button::new(
+                                                    RichText::new("x")
+                                                        .size(metrics::TEXT_SMALL)
+                                                        .color(tokens::TEXT_MUTED),
+                                                )
+                                                .frame(false),
+                                            );
+                                            if close_resp.clicked() {
+                                                dismiss = true;
+                                            }
+                                        });
+                                    });
+                                    if !toast.message.is_empty() {
+                                        ui.label(
+                                            RichText::new(&toast.message)
+                                                .size(metrics::TEXT_SMALL)
+                                                .color(tokens::TEXT_MUTED),
+                                        );
+                                    }
+                                });
+                            });
+                        });
+                });
+
+            if dismiss {
+                self.toast = None;
+            }
+        }
     }
 }
 
@@ -1824,8 +2215,9 @@ fn file_row(
         egui::Sense::hover(),
     );
 
-    let btn_size = 24.0;
-    let total_btn_w = btns.len() as f32 * (btn_size + 2.0) + 4.0;
+    let btn_size = 22.0;
+    let right_pad = 12.0; // Margin to avoid scrollbar overlap
+    let total_btn_w = btns.len() as f32 * (btn_size + 4.0) + right_pad;
     let click_w = (rect.width() - total_btn_w).max(0.0);
     let row_click_rect = egui::Rect::from_min_size(
         rect.min,
@@ -1872,15 +2264,15 @@ fn file_row(
         st.fg,
     );
 
-    // Right-side icon actions in fixed cells
+    // Right-side icon actions in fixed cells with right padding to clear scrollbar
     let mut action = None;
-    let mut x = rect.right() - 4.0 - btn_size;
+    let mut x = rect.right() - right_pad - btn_size;
     for (i, btn) in btns.iter().enumerate().rev() {
         let brect = egui::Rect::from_min_size(
             egui::Pos2::new(x, rect.center().y - btn_size * 0.5),
             Vec2::splat(btn_size),
         );
-        let brep = ui.interact(brect, row_id.with(i), egui::Sense::click());
+        let brep = ui.interact(brect, row_id.with(("action_btn", i)), egui::Sense::click());
         if brep.clicked() {
             action = Some(btn.action);
         }
@@ -1900,7 +2292,7 @@ fn file_row(
             btn.icon,
             if brep.hovered() { tokens::TEXT } else { tokens::TEXT_MUTED },
         );
-        x -= btn_size + 2.0;
+        x -= btn_size + 4.0;
     }
 
     // Path truncated before buttons
@@ -2369,27 +2761,16 @@ fn render_diff_viewer(ui: &mut egui::Ui, diff: &ParsedDiff) {
     let bars = 2.0;
     let advance = mono_advance(ui);
 
-    // Content width estimate for the horizontal scroll bar (monospace exact).
-    let mut content_w: f32 = 96.0 + bars + 8.0;
-    for line in &diff.lines {
-        let mut chars = 0.0;
-        for ch in line.content.chars() {
-            chars += if ch.is_ascii() { 1.0 } else { 1.9 };
-        }
-        content_w = content_w.max(96.0 + bars + 12.0 + chars * advance);
-    }
-    _ = diff.deletions; // stats are painted beside the file name, not here
-
-    let rows = diff.lines.len() as f32;
-    let total_h = rows * metrics::DIFF_ROW_H;
+    // Monospace width from precomputed max line length (O(1))
+    let content_w: f32 = 96.0 + bars + 16.0 + (diff.max_line_len as f32 * advance);
+    let row_h = metrics::DIFF_ROW_H;
+    let total_h = diff.lines.len() as f32 * row_h;
 
     egui::ScrollArea::both()
         .id_salt("diff_content_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
-            // The reader reads as one sheet: rows span the full viewport width
-            // (a wider diff scrolls horizontally over the same canvas).
             let w = content_w.max(ui.available_width());
             let h = total_h.max(ui.available_height());
             let (area, _resp) = ui.allocate_exact_size(
@@ -2397,7 +2778,6 @@ fn render_diff_viewer(ui: &mut egui::Ui, diff: &ParsedDiff) {
                 egui::Sense::hover(),
             );
             let p = &ui.painter_at(area);
-            // The sheet itself, then the gutter column, then the rows.
             p.rect_filled(area, 0.0, tokens::WELL);
             p.rect_filled(
                 egui::Rect::from_min_size(
@@ -2407,24 +2787,32 @@ fn render_diff_viewer(ui: &mut egui::Ui, diff: &ParsedDiff) {
                 0.0,
                 tokens::GUTTER_BG,
             );
-            for (i, line) in diff.lines.iter().enumerate() {
-                paint_diff_row(p, area.left(), area.top() + i as f32 * metrics::DIFF_ROW_H, w, line, bars);
+
+            // Viewport culling: only layout and render rows visible on screen (O(1) frame time)
+            let clip = ui.clip_rect();
+            let first_idx = if clip.top() > area.top() {
+                ((clip.top() - area.top()) / row_h).floor().max(0.0) as usize
+            } else {
+                0
+            };
+            let last_idx = if clip.bottom() > area.top() {
+                (((clip.bottom() - area.top()) / row_h).ceil() + 3.0) as usize
+            } else {
+                0
+            };
+            let last_idx = last_idx.min(diff.lines.len());
+
+            for i in first_idx..last_idx {
+                paint_diff_row(p, area.left(), area.top() + i as f32 * row_h, w, &diff.lines[i], bars);
             }
         });
 }
 
-fn render_code_viewer(ui: &mut egui::Ui, content: &str) {
+fn render_code_viewer(ui: &mut egui::Ui, lines: &[String], max_len: usize) {
     let advance = mono_advance(ui);
-    let lines: Vec<&str> = content.lines().collect();
-    let mut content_w: f32 = 52.0;
-    for l in &lines {
-        let mut chars = 0.0;
-        for ch in l.chars() {
-            chars += if ch.is_ascii() { 1.0 } else { 1.9 };
-        }
-        content_w = content_w.max(52.0 + 4.0 + chars * advance);
-    }
-    let total_h = lines.len() as f32 * metrics::DIFF_ROW_H;
+    let content_w: f32 = 52.0 + 8.0 + (max_len as f32 * advance);
+    let row_h = metrics::DIFF_ROW_H;
+    let total_h = lines.len() as f32 * row_h;
 
     egui::ScrollArea::both()
         .id_salt("code_content_scroll")
@@ -2444,9 +2832,25 @@ fn render_code_viewer(ui: &mut egui::Ui, content: &str) {
                 0.0,
                 tokens::GUTTER_BG,
             );
-            for (idx, line) in lines.iter().enumerate() {
-                let y = area.top() + idx as f32 * metrics::DIFF_ROW_H;
-                let cy = y + metrics::DIFF_ROW_H * 0.5;
+
+            // Viewport culling: only layout and render rows visible on screen
+            let clip = ui.clip_rect();
+            let first_idx = if clip.top() > area.top() {
+                ((clip.top() - area.top()) / row_h).floor().max(0.0) as usize
+            } else {
+                0
+            };
+            let last_idx = if clip.bottom() > area.top() {
+                (((clip.bottom() - area.top()) / row_h).ceil() + 3.0) as usize
+            } else {
+                0
+            };
+            let last_idx = last_idx.min(lines.len());
+
+            for idx in first_idx..last_idx {
+                let line = &lines[idx];
+                let y = area.top() + idx as f32 * row_h;
+                let cy = y + row_h * 0.5;
                 // Line number.
                 let num = (idx + 1).to_string();
                 let font = egui::FontId::monospace(metrics::TEXT_SMALL);
@@ -2459,7 +2863,7 @@ fn render_code_viewer(ui: &mut egui::Ui, content: &str) {
                 // Content.
                 if !line.is_empty() {
                     let font = egui::FontId::monospace(metrics::TEXT_MONO);
-                    let gal = p.layout_no_wrap(line.to_string(), font, tokens::TEXT);
+                    let gal = p.layout_no_wrap(line.clone(), font, tokens::TEXT);
                     p.galley(
                         egui::Pos2::new(
                             area.left() + 52.0 + 4.0,
@@ -2473,44 +2877,50 @@ fn render_code_viewer(ui: &mut egui::Ui, content: &str) {
         });
 }
 
-// Recursive directory tree renderer — folders carry the collapsing arrow,
-// files carry the vector file glyph (no emoji, 30a).
+// Recursive directory tree renderer with cache вЂ” folders carry the collapsing arrow,
+// files carry the vector file glyph.
 fn render_dir_tree(
     ui: &mut egui::Ui,
     root: &Path,
     current_dir: &Path,
+    dir_cache: &mut std::collections::HashMap<PathBuf, (Vec<(String, PathBuf)>, Vec<(String, PathBuf)>)>,
     file_to_read: &mut Option<String>,
 ) {
-    let Ok(entries) = std::fs::read_dir(current_dir) else {
-        return;
-    };
+    let (dirs, files) = dir_cache.entry(current_dir.to_path_buf()).or_insert_with(|| {
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
 
-    let mut dirs = Vec::new();
-    let mut files = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(current_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
+                if name == ".git" || name == "target" || name == "node_modules" {
+                    continue;
+                }
 
-        if name == ".git" || name == "target" {
-            continue;
+                if path.is_dir() {
+                    dirs.push((name, path));
+                } else {
+                    files.push((name, path));
+                }
+            }
+
+            dirs.sort_by(|a, b| a.0.cmp(&b.0));
+            files.sort_by(|a, b| a.0.cmp(&b.0));
         }
 
-        if path.is_dir() {
-            dirs.push((name, path));
-        } else {
-            files.push((name, path));
-        }
-    }
+        (dirs, files)
+    });
 
-    dirs.sort_by(|a, b| a.0.cmp(&b.0));
-    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let dirs = dirs.clone();
+    let files = files.clone();
 
     ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
 
     for (name, path) in dirs {
         ui.collapsing(RichText::new(name.clone()).color(tokens::TEXT_MUTED), |ui| {
-            render_dir_tree(ui, root, &path, file_to_read);
+            render_dir_tree(ui, root, &path, dir_cache, file_to_read);
         });
     }
 

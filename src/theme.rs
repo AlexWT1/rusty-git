@@ -147,6 +147,7 @@ pub mod icons {
         Check,
         Warn,
         File,
+        Link,
     }
 
     fn pt(rect: Rect, fx: f32, fy: f32) -> Pos2 {
@@ -286,6 +287,17 @@ pub mod icons {
                     stroke(w * 1.2, color),
                 ));
                 p.add(Shape::circle_filled(pt(rect, 0.50, 0.74), rect.height() * 0.035, color));
+            }
+            Icon::Link => {
+                p.add(Shape::line(
+                    pts(&[(0.38, 0.62), (0.24, 0.76), (0.16, 0.76), (0.10, 0.70), (0.10, 0.62), (0.24, 0.48), (0.38, 0.62)]),
+                    stroke(w, color),
+                ));
+                p.add(Shape::line(
+                    pts(&[(0.62, 0.38), (0.76, 0.24), (0.84, 0.24), (0.90, 0.30), (0.90, 0.38), (0.76, 0.52), (0.62, 0.38)]),
+                    stroke(w, color),
+                ));
+                p.add(Shape::line(pts(&[(0.34, 0.66), (0.66, 0.34)]), stroke(w, color)));
             }
         }
     }

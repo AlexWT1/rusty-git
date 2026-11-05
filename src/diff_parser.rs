@@ -4,11 +4,26 @@ pub fn parse_git_diff(raw_diff: &str) -> ParsedDiff {
     let mut lines = Vec::new();
     let mut additions = 0;
     let mut deletions = 0;
+    let mut max_line_len = 0;
 
     let mut cur_old_line: Option<usize> = None;
     let mut cur_new_line: Option<usize> = None;
 
+    const MAX_DIFF_LINES: usize = 25_000;
+
     for line in raw_diff.lines() {
+        if lines.len() >= MAX_DIFF_LINES {
+            lines.push(DiffLine {
+                kind: DiffLineKind::Meta,
+                old_line: None,
+                new_line: None,
+                content: "... [Diff truncated for performance. Remaining lines omitted] ...".to_string(),
+            });
+            break;
+        }
+
+        max_line_len = max_line_len.max(line.len());
+
         if line.starts_with("diff --git")
             || line.starts_with("index ")
             || line.starts_with("--- ")
@@ -93,6 +108,7 @@ pub fn parse_git_diff(raw_diff: &str) -> ParsedDiff {
         lines,
         additions,
         deletions,
+        max_line_len,
     }
 }
 
